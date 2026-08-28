@@ -13,8 +13,20 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
+  metadataBase: new URL('https://rede-ensaios-rs-demo-2026.gdmseeds-whe-7678.chatgpt.site'),
   title: 'Rede de Ensaios RS',
   description: 'Gestão integrada da rede experimental de trigo do Rio Grande do Sul.',
+  openGraph: {
+    title: 'Rede de Ensaios RS',
+    description: 'Pesquisa que conecta o campo.',
+    images: [{ url: '/og.png', width: 1200, height: 630 }],
+  },
+  twitter: {
+    card: 'summary_large_image',
+    title: 'Rede de Ensaios RS',
+    description: 'Pesquisa que conecta o campo.',
+    images: ['/og.png'],
+  },
 };
 
 export default function RootLayout({
