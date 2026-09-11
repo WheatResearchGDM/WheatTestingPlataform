@@ -5,6 +5,11 @@ import { FormEvent, useEffect, useMemo, useState } from 'react';
 import type { NetworkLocation } from '../components/NetworkMap';
 import type { LayoutFinalization } from '../components/FieldLayoutMap';
 import {
+  importedActivities,
+  importedLocations,
+  importedPlanning,
+  importedSource,
+  importedTrials,
   importedUsers,
   sourceSummary,
 } from './data/rede';
@@ -38,10 +43,14 @@ function confirmAction(message: string, action: () => void) {
   if (window.confirm(message)) action();
 }
 
-const locations: NetworkLocation[] = [];
-const trials: Trial[] = [];
-const initialPlanning: PlannedActivity[] = [];
-const initialActivities: Activity[] = [];
+const baseLocations: NetworkLocation[] = importedLocations.map((location) => ({ ...location }));
+const baseTrials: Trial[] = importedTrials.map((trial) => ({ ...trial }));
+const basePlanning: PlannedActivity[] = importedPlanning.map((activity) => ({ ...activity }));
+const baseActivities: Activity[] = importedActivities.map((activity) => activity);
+const locations: NetworkLocation[] = baseLocations.map((location) => ({ ...location }));
+const trials: Trial[] = baseTrials.map((trial) => ({ ...trial }));
+const initialPlanning: PlannedActivity[] = basePlanning.map((activity) => ({ ...activity }));
+const initialActivities: Activity[] = baseActivities.map((activity) => ({ ...activity }));
 const blankTrial: Trial = { id: '', name: '', type: '', year: 2026, cycle: 'Safra 2026', locationId: '', plots: 0, sowing: sourceSummary.importedAt, harvest: sourceSummary.importedAt, owner: '', rawStatus: 'Planejado', priority: 'Normal', notes: '', place: '', city: '', status: 'Planejado', progress: 0, next: '', nextDate: sourceSummary.importedAt, date: '' };
 const currentUser = importedUsers[0];
 const totalRegions = 0;
@@ -250,25 +259,42 @@ export default function Home() {
     try {
       const snapshots = JSON.parse(localStorage.getItem('field-wheat-harvest-data-v2') ?? '{}') as Record<string, HarvestSnapshot>;
       const snapshot = snapshots[activeHarvestId];
-      const savedLocations = snapshot?.locations ?? JSON.parse(localStorage.getItem('field-wheat-locations-clean-v1') ?? '[]') as NetworkLocation[];
-      const savedTrials = snapshot?.trials ?? JSON.parse(localStorage.getItem('field-wheat-imported-trials-clean-v1') ?? '[]') as Trial[];
+      const storedLocations = JSON.parse(localStorage.getItem('field-wheat-locations-clean-v1') ?? '[]') as NetworkLocation[];
+      const storedTrials = JSON.parse(localStorage.getItem('field-wheat-imported-trials-clean-v1') ?? '[]') as Trial[];
+      const savedLocations = snapshot?.locations?.length ? snapshot.locations : storedLocations.length ? storedLocations : baseLocations;
+      const savedTrials = snapshot?.trials?.length ? snapshot.trials : storedTrials.length ? storedTrials : baseTrials;
       locations.splice(0, locations.length, ...savedLocations);
       trials.splice(0, trials.length, ...savedTrials);
-      if (snapshot) { setSchedule(snapshot.schedule); setActivities(snapshot.activities); setLastUpdated(snapshot.updatedAt); localStorage.setItem('field-wheat-unified-source-v1', JSON.stringify(snapshot.source)); }
+      if (snapshot?.locations?.length || snapshot?.trials?.length) { setSchedule(snapshot.schedule); setActivities(snapshot.activities); setLastUpdated(snapshot.updatedAt); localStorage.setItem('field-wheat-unified-source-v1', JSON.stringify(snapshot.source)); }
       if (savedTrials[0]) setSelectedTrial(savedTrials[0]);
       setDataVersion((value) => value + 1);
-    } catch { /* Base permanece vazia quando não houver importação válida. */ }
+    } catch { /* A base incorporada permanece disponível quando o armazenamento local é inválido. */ }
   }, []);
 
   useEffect(() => {
-    const workflowVersion = 'croqui-origem-v1';
+    const workflowVersion = `base-${sourceSummary.importedAt}-v1`;
     if (localStorage.getItem('field-wheat-workflow-version') === workflowVersion) return;
-    setSchedule([]); localStorage.setItem('field-wheat-schedule-clean-v1', '[]'); localStorage.setItem('field-wheat-unified-source-v1', '[]');
-    try {
-      const snapshots = JSON.parse(localStorage.getItem('field-wheat-harvest-data-v2') ?? '{}') as Record<string, HarvestSnapshot>;
-      Object.keys(snapshots).forEach((id) => { snapshots[id] = { ...snapshots[id], schedule: [], source: [] }; });
-      localStorage.setItem('field-wheat-harvest-data-v2', JSON.stringify(snapshots));
-    } catch { /* A limpeza local continua válida mesmo sem histórico. */ }
+    if (!locations.length || !trials.length) {
+      const seededLocations = baseLocations.map((location) => ({ ...location }));
+      const seededTrials = baseTrials.map((trial) => ({ ...trial }));
+      const seededSchedule = basePlanning.map((activity) => ({ ...activity }));
+      const seededActivities = baseActivities.map((activity) => ({ ...activity }));
+      locations.splice(0, locations.length, ...seededLocations);
+      trials.splice(0, trials.length, ...seededTrials);
+      setSchedule(seededSchedule); setActivities(seededActivities); setSelectedTrial(seededTrials[0] ?? blankTrial);
+      localStorage.setItem('field-wheat-locations-clean-v1', JSON.stringify(seededLocations));
+      localStorage.setItem('field-wheat-imported-trials-clean-v1', JSON.stringify(seededTrials));
+      localStorage.setItem('field-wheat-schedule-clean-v1', JSON.stringify(seededSchedule));
+      localStorage.setItem('field-wheat-activities-clean-v1', JSON.stringify(seededActivities));
+      localStorage.setItem('field-wheat-unified-source-v1', JSON.stringify(importedSource));
+      const updatedAt = new Date().toISOString();
+      try {
+        const snapshots = JSON.parse(localStorage.getItem('field-wheat-harvest-data-v2') ?? '{}') as Record<string, HarvestSnapshot>;
+        snapshots[activeHarvestId] = { locations: seededLocations, trials: seededTrials, schedule: seededSchedule, activities: seededActivities, source: importedSource.map((row) => ({ ...row })), updatedAt };
+        localStorage.setItem('field-wheat-harvest-data-v2', JSON.stringify(snapshots));
+      } catch { /* O app continua com a base incorporada mesmo sem o histórico local. */ }
+      setLastUpdated(updatedAt); setDataVersion((value) => value + 1);
+    }
     localStorage.setItem('field-wheat-workflow-version', workflowVersion);
   }, []);
 
