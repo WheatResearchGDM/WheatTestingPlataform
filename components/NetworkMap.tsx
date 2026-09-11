@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { CircleMarker, MapContainer, Popup, TileLayer, Tooltip } from 'react-leaflet';
 
 export type NetworkLocation = {
@@ -35,6 +35,18 @@ export default function NetworkMap({
   onSelect?: (id: string) => void;
 }) {
   const [mapStyle, setMapStyle] = useState<'satellite' | 'street'>('satellite');
+  const displayLocations = useMemo(() => {
+    const groups = new Map<string, NetworkLocation[]>();
+    locations.forEach((location) => { const key = `${location.lat.toFixed(6)}:${location.lng.toFixed(6)}`; groups.set(key, [...(groups.get(key) ?? []), location]); });
+    return locations.map((location) => {
+      const group = groups.get(`${location.lat.toFixed(6)}:${location.lng.toFixed(6)}`) ?? [location];
+      if (group.length === 1) return { location, displayLat: location.lat, displayLng: location.lng };
+      const index = group.findIndex((item) => item.id === location.id);
+      const angle = (Math.PI * 2 * index) / group.length;
+      const radius = 0.00011 + Math.floor(index / 8) * 0.00005;
+      return { location, displayLat: location.lat + Math.sin(angle) * radius, displayLng: location.lng + Math.cos(angle) * radius };
+    });
+  }, [locations]);
 
   return (
     <div className="network-map-shell">
@@ -57,10 +69,10 @@ export default function NetworkMap({
         attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
         url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
       />}
-      {locations.map((location) => (
+      {displayLocations.map(({ location, displayLat, displayLng }) => (
         <CircleMarker
           key={location.id}
-          center={[location.lat, location.lng]}
+          center={[displayLat, displayLng]}
           radius={Math.max(9, Math.min(18, 7 + location.plots / 24))}
           pathOptions={{
             color: '#fffdf8',
