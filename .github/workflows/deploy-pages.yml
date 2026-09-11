@@ -42,7 +42,7 @@ jobs:
       - name: Enviar arquivos da plataforma
         uses: actions/upload-pages-artifact@v5
         with:
-          path: dist/client
+          path: dist/client/WheatTestingPlataform
 
   deploy:
     environment:
