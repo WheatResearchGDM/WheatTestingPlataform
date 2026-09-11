@@ -34,7 +34,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Gerar versão estática
-        run: pnpm build
+        run: pnpm build:github-pages
 
       - name: Configurar GitHub Pages
         uses: actions/configure-pages@v5
@@ -42,7 +42,7 @@ jobs:
       - name: Enviar arquivos da plataforma
         uses: actions/upload-pages-artifact@v5
         with:
-          path: dist/client/WheatTestingPlataform
+          path: dist/github-pages
 
   deploy:
     environment:
