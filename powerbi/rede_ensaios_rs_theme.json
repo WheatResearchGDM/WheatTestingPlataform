@@ -1,0 +1,40 @@
+{
+  "name": "Rede de Ensaios RS",
+  "dataColors": [
+    "#1D6B4F",
+    "#9DCE36",
+    "#E6A53A",
+    "#D45A4C",
+    "#2D7EA8",
+    "#7A6A58",
+    "#5A8F73",
+    "#C5B99E"
+  ],
+  "background": "#F5F3EA",
+  "foreground": "#173A2D",
+  "tableAccent": "#1D6B4F",
+  "good": "#1D6B4F",
+  "neutral": "#E6A53A",
+  "bad": "#D45A4C",
+  "visualStyles": {
+    "*": {
+      "*": {
+        "background": [{ "color": { "solid": { "color": "#FFFFFF" } }, "transparency": 0 }],
+        "border": [{ "show": true, "color": { "solid": { "color": "#DED9CB" } }, "radius": 8 }],
+        "title": [{ "fontFace": "Segoe UI Semibold", "fontSize": 12, "fontColor": { "solid": { "color": "#173A2D" } } }],
+        "visualHeader": [{ "show": true }]
+      }
+    },
+    "page": {
+      "*": {
+        "background": [{ "color": { "solid": { "color": "#F5F3EA" } }, "transparency": 0 }]
+      }
+    },
+    "cardVisual": {
+      "*": {
+        "labels": [{ "fontColor": { "solid": { "color": "#173A2D" } }, "fontSize": 28 }],
+        "categoryLabels": [{ "fontColor": { "solid": { "color": "#69776F" } }, "fontSize": 11 }]
+      }
+    }
+  }
+}

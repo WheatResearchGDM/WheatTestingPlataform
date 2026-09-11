@@ -1,0 +1,53 @@
+-- Tabela recomendada: MEDIDAS
+
+Total Locais =
+DISTINCTCOUNT(LOCAIS[local_id*])
+
+Total Ensaios =
+DISTINCTCOUNT(ENSAIOS[ensaio_id*])
+
+Total Parcelas =
+SUM(ENSAIOS[n_parcelas*])
+
+Ensaios Críticos =
+CALCULATE(
+    [Total Ensaios],
+    ENSAIOS[prioridade] = "Crítica"
+)
+
+Ensaios Alta Prioridade =
+CALCULATE(
+    [Total Ensaios],
+    ENSAIOS[prioridade] = "Alta"
+)
+
+Atividades Planejadas =
+DISTINCTCOUNT(PLANEJAMENTO[atividade_id*])
+
+Atividades Realizadas =
+DISTINCTCOUNT(ATIVIDADES_REALIZADAS[registro_id*])
+
+Percentual Realizado =
+DIVIDE([Atividades Realizadas], [Atividades Planejadas], 0)
+
+Ensaios com Registro =
+DISTINCTCOUNT(ATIVIDADES_REALIZADAS[ensaio_id*])
+
+Cobertura de Registro =
+DIVIDE([Ensaios com Registro], [Total Ensaios], 0)
+
+Parcelas por Local =
+SUM(ENSAIOS[n_parcelas*])
+
+Próximas Atividades =
+CALCULATE(
+    [Atividades Planejadas],
+    PLANEJAMENTO[data_inicio_planejada*] >= TODAY()
+)
+
+Atividades Atrasadas =
+CALCULATE(
+    [Atividades Planejadas],
+    PLANEJAMENTO[data_fim_planejada] < TODAY(),
+    PLANEJAMENTO[status_planejado] <> "Concluído"
+)

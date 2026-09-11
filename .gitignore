@@ -36,3 +36,9 @@ next-env.d.ts
 /.wrangler/
 /outputs/
 /work/
+/.pnpm-store/
+*.tsbuildinfo
+
+# editor and local preview
+/.vscode/
+/preview*.log
