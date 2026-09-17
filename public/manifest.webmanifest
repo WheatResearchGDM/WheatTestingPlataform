@@ -1,0 +1,18 @@
+{
+  "name": "Field Wheat Testing - Plataforma de gerenciamento operacional",
+  "short_name": "Field Wheat",
+  "description": "Planejamento e registros operacionais da rede de ensaios de trigo.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f5f7f2",
+  "theme_color": "#1f6b45",
+  "icons": [
+    {
+      "src": "favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

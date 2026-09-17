@@ -36,6 +36,9 @@ jobs:
       - name: Gerar versão estática
         run: pnpm build:github-pages
 
+      - name: Validar página inicial
+        run: test -f dist/github-pages/index.html
+
       - name: Configurar GitHub Pages
         uses: actions/configure-pages@v5
 
