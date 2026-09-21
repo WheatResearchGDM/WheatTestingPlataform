@@ -161,76 +161,6 @@ export default function FieldLayoutMap({ location, trials, harvestId, onClose, o
     return broken;
   }, [plots, detectionThreshold]);
 
-  function detectTrialRangesByPrefix(sourcePlots: LayoutPlot[]) {
-    const grouped = new Map<string, LayoutPlot[]>();
-    sourcePlots.forEach((plot) => {
-      const code = plot.plotId.toUpperCase().includes('PULV') ? 'PULV' : plot.plotId.slice(0, 2);
-      if (!/^\d{2}$/.test(code)) return;
-      const group = grouped.get(code) ?? [];
-      group.push(plot);
-      grouped.set(code, group);
-    });
-    const codes = [...grouped.keys()].sort((a, b) => a.localeCompare(b, 'pt-BR', { numeric: true }));
-    const detected = codes.map((code, index) => {
-      const group = grouped.get(code) ?? [];
-      const existing = allocations.find((allocation) => allocation.code === code || allocation.id === code);
-      return {
-        id: code,
-        code,
-        name: existing?.name ?? trialLabels[code] ?? `Ensaio ${code}`,
-        startPlotId: group[0]?.plotId ?? '',
-        endPlotId: group[group.length - 1]?.plotId ?? '',
-        color: existing?.color ?? `hsl(${Math.round(index * (360 / Math.max(codes.length, 1)))}, 75%, 45%)`,
-        plotCount: group.length,
-      };
-    });
-    const nextPlots = sourcePlots.map((plot) => {
-      const code = plot.plotId.toUpperCase().includes('PULV') ? 'PULV' : plot.plotId.slice(0, 2);
-      return /^\d{2}$/.test(code)
-        ? { ...plot, trialId: code, allocationId: code, sourceTrialId: plot.sourceTrialId ?? code }
-        : { ...plot, trialId: code, sourceTrialId: plot.sourceTrialId ?? code };
-    });
-    return { nextPlots, detected };
-  }
-
-  function detectTrialRangesByJump(sourcePlots: LayoutPlot[]) {
-    const ordered = [...sourcePlots].sort((a, b) => a.row - b.row || a.col - b.col);
-    const groups: LayoutPlot[][] = [];
-    let current: LayoutPlot[] = [];
-    let previousNumber: number | null = null;
-    ordered.forEach((plot) => {
-      if (plot.plotId.toUpperCase().includes('PULV')) { if (current.length) groups.push(current); current = []; previousNumber = null; return; }
-      const numericText = plot.plotId.match(/\d+/)?.[0] ?? '';
-      const numeric = numericText ? Number(numericText) : NaN;
-      const abruptChange = previousNumber !== null && Number.isFinite(numeric) && Math.abs(numeric - previousNumber) > detectionThreshold;
-      if (abruptChange && current.length) { groups.push(current); current = []; }
-      current.push(plot);
-      previousNumber = Number.isFinite(numeric) ? numeric : previousNumber;
-    });
-    if (current.length) groups.push(current);
-    const usedCodes = new Map<string, number>();
-    const detected = groups.map((group, index) => {
-      const firstDigits = group[0].plotId.match(/\d+/)?.[0] ?? '';
-      const baseCode = firstDigits.slice(0, 2) || group[0].sourceTrialId || `ENS${index + 1}`;
-      const occurrence = (usedCodes.get(baseCode) ?? 0) + 1; usedCodes.set(baseCode, occurrence);
-      const id = occurrence === 1 ? baseCode : `${baseCode}-${occurrence}`;
-      return { id, code: id, name: `Ensaio ${baseCode}`, startPlotId: group[0].plotId, endPlotId: group[group.length - 1].plotId, color: palette[index % palette.length], plotCount: group.length, plotIds: new Set(group.map((plot) => plot.plotId)) };
-    });
-    const nextPlots = sourcePlots.map((plot) => { const match = detected.find((allocation) => allocation.plotIds.has(plot.plotId)); return match ? { ...plot, trialId: match.id, allocationId: match.id, sourceTrialId: plot.sourceTrialId ?? plot.trialId } : plot; });
-    return { nextPlots, detected: detected.map(({ plotIds: _plotIds, ...allocation }) => allocation) };
-  }
-
-  function runAutomaticDetection(sourcePlots = plots) {
-    const { nextPlots, detected } = detectTrialRangesByPrefix(sourcePlots);
-    setImportedPlots(nextPlots); setAllocations(detected); setTrialLabels({ ...trialLabels, ...Object.fromEntries(detected.map((allocation) => [allocation.id, allocation.name])) }); setDirty(true);
-  }
-
-  function runThresholdDetection() {
-    const { nextPlots, detected } = detectTrialRangesByJump(plots);
-    setImportedPlots(nextPlots); setAllocations(detected); setTrialLabels({ ...trialLabels, ...Object.fromEntries(detected.map((allocation) => [allocation.id, allocation.name])) }); setDirty(true);
-    setImportStatus(`${detected.length} ensaios separados pelo limite de mudança ${detectionThreshold}.`);
-  }
-
   async function importLayout(file?: File) {
     if (!file || !isEditing) return;
     setImportError(''); setImportStatus('Lendo o croqui…');
@@ -291,6 +221,11 @@ export default function FieldLayoutMap({ location, trials, harvestId, onClose, o
 
   function currentSettings(): LayoutSettings { return { plotLength, plotWidth, gapLength, gapWidth, rotation, flipX, flipY, mapStyle, showPlotIds, center, trialLabels, trialVisibility }; }
   function saveLayout() {
+    if (!importedPlots?.length) { setImportError('Carregue o mapa de plantio antes de concluir o cadastro.'); return; }
+    if (!city.trim()) { setImportError('Informe a cidade da área antes de concluir.'); return; }
+    if (!plannedSowingDate) { setImportError('Informe a data prevista de semeadura antes de concluir.'); return; }
+    if (!allocations.length) { setImportError('Defina pelo menos um ensaio por intervalo de PlotID/Trat antes de concluir.'); return; }
+    setImportError('');
     const saved = new Date().toISOString();
     const resolvedAreaType = customAreaType.trim() || areaType;
     const metadata: AreaMetadata = { city: city.trim(), areaType: resolvedAreaType, plannedSowingDate, detectionThreshold, mapId: activeMapId, mapName: mapName.trim() || resolvedAreaType };
@@ -332,15 +267,20 @@ export default function FieldLayoutMap({ location, trials, harvestId, onClose, o
     const ordered = [...plots].sort((a, b) => a.row - b.row || a.col - b.col);
     const startIndex = ordered.findIndex((plot) => plot.plotId === rangeStart.trim());
     const endIndex = ordered.findIndex((plot) => plot.plotId === rangeEnd.trim());
-    if (!code || !name || startIndex < 0 || endIndex < 0) return;
-    const from = Math.min(startIndex, endIndex), to = Math.max(startIndex, endIndex);
-    const selectedIds = new Set(ordered.slice(from, to + 1).map((plot) => plot.plotId));
+    if (!code || !name || startIndex < 0 || endIndex < 0) { setImportError('Informe PlotIDs inicial e final existentes no croqui.'); return; }
+    const plotNumber = (value: string) => { const match = value.trim().match(/\d+(?:[.,]\d+)?(?!.*\d)/)?.[0]; return match ? Number(match.replace(',', '.')) : Number.NaN; };
+    const startNumber = plotNumber(ordered[startIndex].plotId); const endNumber = plotNumber(ordered[endIndex].plotId);
+    if (!Number.isFinite(startNumber) || !Number.isFinite(endNumber)) { setImportError('Os PlotIDs inicial e final precisam conter uma numeração Trat válida.'); return; }
+    const minimum = Math.min(startNumber, endNumber), maximum = Math.max(startNumber, endNumber);
+    const selected = plots.filter((plot) => !isUtilityPlot(plot) && (() => { const value = plotNumber(plot.plotId); return Number.isFinite(value) && value >= minimum && value <= maximum; })());
+    if (!selected.length) { setImportError('Nenhuma parcela foi encontrada dentro do intervalo informado.'); return; }
+    const selectedIds = new Set(selected.map((plot) => plot.plotId));
     const id = code.toUpperCase().replace(/[^A-Z0-9_-]+/g, '-');
     const existing = allocations.find((allocation) => allocation.id === id);
-    const allocation: TrialAllocation = { id, code, name, startPlotId: ordered[from].plotId, endPlotId: ordered[to].plotId, color: allocationColor || existing?.color || palette[allocations.length % palette.length], plotCount: selectedIds.size };
+    const allocation: TrialAllocation = { id, code, name, startPlotId: ordered[startIndex].plotId, endPlotId: ordered[endIndex].plotId, color: allocationColor || existing?.color || palette[allocations.length % palette.length], plotCount: selectedIds.size };
     setImportedPlots(plots.map((plot) => selectedIds.has(plot.plotId) ? { ...plot, trialId: id, allocationId: id, sourceTrialId: plot.sourceTrialId ?? plot.trialId } : plot));
     setAllocations([...allocations.filter((item) => item.id !== id), allocation]);
-    setTrialLabels({ ...trialLabels, [id]: name }); setTrialVisibility({ ...trialVisibility, [id]: true }); setDirty(true); setSelectedPlotId(ordered[from].plotId);
+    setTrialLabels({ ...trialLabels, [id]: name }); setTrialVisibility({ ...trialVisibility, [id]: true }); setDirty(true); setSelectedPlotId(ordered[startIndex].plotId); setImportError('');
   }
   function removeAllocation(id: string) {
     setImportedPlots(plots.map((plot) => plot.allocationId === id ? { ...plot, trialId: 'UNASSIGNED', allocationId: undefined } : plot));
@@ -377,7 +317,7 @@ export default function FieldLayoutMap({ location, trials, harvestId, onClose, o
   return <div className="layout-modal" role="dialog" aria-modal="true" aria-label={`Croqui de ${location.name}`}>
     <button className="layout-backdrop" onClick={onClose} aria-label="Fechar croqui" />
     <section className="layout-dialog">
-      <header><div><span>CROQUI DA ÁREA · {location.id}</span><h2>{location.name}</h2><p>{location.city} · {visibleCount.toLocaleString('pt-BR')} parcelas visíveis</p></div><div className="layout-header-actions">{readOnly ? <span className="layout-view-state">Somente consulta</span> : isEditing ? <><button className="layout-cancel" onClick={() => restore(savedSnapshot)}>Cancelar</button><button className="layout-save" onClick={saveLayout}>✓ Salvar croqui{dirty ? ' *' : ''}</button></> : <><span className="layout-view-state">Salvo</span><button className="layout-edit" onClick={() => setIsEditing(true)}>✎ Editar croqui</button></>}<button className="layout-close" onClick={onClose} aria-label="Fechar">×</button></div></header>
+      <header><div><span>CROQUI DA ÁREA · {location.id}</span><h2>{location.name}</h2><p>{location.city} · {visibleCount.toLocaleString('pt-BR')} parcelas visíveis</p></div><div className="layout-header-actions">{readOnly ? <span className="layout-view-state">Somente consulta</span> : isEditing ? <><button className="layout-cancel" onClick={() => restore(savedSnapshot)}>Cancelar</button><button className="layout-save" onClick={saveLayout}>✓ Concluir e cadastrar área{dirty ? ' *' : ''}</button></> : <><span className="layout-view-state">Cadastrado</span><button className="layout-edit" onClick={() => setIsEditing(true)}>✎ Editar croqui</button></>}<button className="layout-close" onClick={onClose} aria-label="Fechar">×</button></div></header>
       <div className="layout-workspace">
         <aside>
           <div className="layout-control layout-map-catalog"><h3>Mapas de plantio do local</h3><label>Mapa ativo<select value={activeMapId} onChange={(event) => selectMap(event.target.value)}>{savedLayouts.map((item) => <option key={item.metadata?.mapId} value={item.metadata?.mapId}>{item.metadata?.areaType} · {item.metadata?.mapName}</option>)}{!savedLayouts.length && <option value={activeMapId}>Novo mapa</option>}</select></label><label>Nome do mapa<input disabled={!isEditing} value={mapName} onChange={(event) => setAndDirty(() => setMapName(event.target.value))} placeholder="Ex.: Coleções norte" /></label>{!readOnly && <button className="layout-action-button" type="button" onClick={newMap}>＋ Inserir novo mapa de plantio</button>}<small className="layout-help">Cada mapa é salvo isoladamente por categoria; o local mantém o conjunto completo.</small></div>
