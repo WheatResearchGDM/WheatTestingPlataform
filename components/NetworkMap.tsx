@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from 'react';
 import { CircleMarker, MapContainer, Popup, TileLayer, Tooltip } from 'react-leaflet';
+import type { LocationWeather } from '../lib/weatherAlerts';
 
 export type NetworkLocation = {
   id: string;
@@ -19,6 +20,7 @@ export type NetworkLocation = {
   plantedPercent?: number;
   phenologicalStage?: string;
   alertCount?: number;
+  weather?: LocationWeather;
 };
 
 const statusColors = { ok: '#4d885e', attention: '#d9a72f', late: '#c95b45' };
@@ -89,7 +91,7 @@ export default function NetworkMap({
         >
           <Tooltip permanent direction="top" offset={[0, -10]} opacity={1} className="map-location-label">
             <b>{location.name.replace(/\s*-?\s*RS$/i, '')}</b>
-            <small>{location.trials} ensaios</small>
+            <small>{location.weather ? `${location.weather.temperature.toFixed(1)}°C · ${location.weather.condition}` : `${location.trials} ensaios`}</small>
           </Tooltip>
           <Popup>
             <div className="map-popup">
@@ -99,6 +101,7 @@ export default function NetworkMap({
               <div><b>{location.trials}</b> ensaios · <b>{location.plots}</b> parcelas</div>
               {location.plantedPercent !== undefined && <div><b>{location.plantedPercent}%</b> semeados · {location.phenologicalStage}</div>}
               {location.alertCount !== undefined && <div><b>{location.alertCount}</b> alerta(s) de campo</div>}
+              {location.weather && <div className="map-weather-summary"><b>{location.weather.temperature.toFixed(1)}°C · {location.weather.condition}</b><small>Média das fontes · chuva {location.weather.precipitation.toFixed(1)} mm</small>{location.weather.sources.map((source) => <span key={source.id}><strong>{source.name}</strong>{source.available ? `${source.temperature.toFixed(1)}°C · ${source.condition} · ${source.precipitation.toFixed(1)} mm` : 'Indisponível'}</span>)}</div>}
               <small>{location.qualityTone === 'neutral' ? 'Sem ensaios avaliados' : location.qualityTone ? `Qualidade ${qualityLabels[location.qualityTone]} · ${location.qualityScore ?? 0}/100` : statusLabels[location.status]}</small>
             </div>
           </Popup>
