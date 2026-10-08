@@ -8,6 +8,7 @@ export type NetworkLocation = {
   name: string;
   city: string;
   region: string;
+  rha?: string;
   lat: number;
   lng: number;
   trials: number;
