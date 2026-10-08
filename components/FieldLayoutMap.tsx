@@ -5,7 +5,7 @@ import { divIcon, type LeafletEvent, type Marker as LeafletMarker } from 'leafle
 import { MapContainer, Marker, Polygon, TileLayer, Tooltip, useMap, useMapEvents } from 'react-leaflet';
 
 type LayoutTrial = { id: string; name: string; type: string; subtype?: string; plots: number };
-export type LayoutPlot = { plotId: string; row: number; col: number; genotype: string; genealogy?: string; trialId: string; sourceTrialId?: string; allocationId?: string };
+export type LayoutPlot = { plotId: string; row: number; col: number; genotype: string; genealogy?: string; trialId: string; sourceTrialId?: string; allocationId?: string; excelColor?: string };
 type MapStyle = 'satellite' | 'google' | 'street';
 export type TrialAllocation = { id: string; code: string; name: string; startPlotId: string; endPlotId: string; color: string; plotCount: number };
 export type IssueKind = 'Observação' | 'Alerta' | 'Troca de genótipo' | 'Linha entupida' | 'Falha de semeadura' | 'Passada de pulverizador' | 'Fitotoxidez' | 'Parcela perdida' | 'Outro';
@@ -28,6 +28,21 @@ function isUtilityPlot(plot: LayoutPlot) {
   return label.includes('PULV') || label.includes('LNX');
 }
 
+function excelFillColor(fill: unknown) {
+  if (!fill || typeof fill !== 'object') return undefined;
+  const source = fill as { type?: string; pattern?: string; fgColor?: { argb?: string; indexed?: number } };
+  if (source.type !== 'pattern' || source.pattern === 'none') return undefined;
+  const argb = source.fgColor?.argb?.replace(/^#/, '').toUpperCase();
+  if (argb && /^[0-9A-F]{6}$/.test(argb)) return `#${argb}`;
+  if (argb && /^[0-9A-F]{8}$/.test(argb) && argb.slice(0, 2) !== '00') return `#${argb.slice(2)}`;
+  const indexedColors: Record<number, string> = {
+    0:'#000000', 1:'#FFFFFF', 2:'#FF0000', 3:'#00FF00', 4:'#0000FF', 5:'#FFFF00', 6:'#FF00FF', 7:'#00FFFF',
+    8:'#000000', 9:'#FFFFFF', 10:'#FF0000', 11:'#00FF00', 12:'#0000FF', 13:'#FFFF00', 14:'#FF00FF', 15:'#00FFFF',
+    16:'#800000', 17:'#008000', 18:'#000080', 19:'#808000', 20:'#800080', 21:'#008080', 22:'#C0C0C0', 23:'#808080'
+  };
+  return source.fgColor?.indexed === undefined ? undefined : indexedColors[source.fgColor.indexed];
+}
+
 function ZoomTracker({ onZoom }: { onZoom: (zoom: number) => void }) {
   useMapEvents({ zoomend(event) { onZoom(event.target.getZoom()); } });
   return null;
@@ -47,7 +62,7 @@ function FitLayoutBounds({ positions, token }: { positions: [number, number][][]
 export default function FieldLayoutMap({ location, trials, harvestId, onClose, onFinalize, readOnly = false }: { location: { id: string; name: string; city: string; lat: number; lng: number; region?: string; rha?: string }; trials: LayoutTrial[]; harvestId: string; onClose: () => void; onFinalize?: (payload: LayoutFinalization) => void; readOnly?: boolean }) {
   const legacyStorageKey = `field-wheat-layout-${harvestId}-${location.id}`;
   const catalogKey = `field-wheat-layout-catalog-${harvestId}-${location.id}`;
-  const defaults: LayoutSettings = { plotLength: 5, plotWidth: 2, gapLength: .5, gapWidth: 0, rotation: 0, flipX: false, flipY: false, mapStyle: 'satellite', showPlotIds: true, center: [location.lat, location.lng], trialLabels: {}, trialVisibility: {} };
+  const defaults: LayoutSettings = { plotLength: 1, plotWidth: 6, gapLength: .1, gapWidth: 0, rotation: 0, flipX: false, flipY: false, mapStyle: 'satellite', showPlotIds: true, center: [location.lat, location.lng], trialLabels: {}, trialVisibility: {} };
   const [savedLayouts, setSavedLayouts] = useState<LayoutSnapshot[]>(() => { try { const catalog = JSON.parse(localStorage.getItem(catalogKey) ?? '[]') as LayoutSnapshot[]; if (catalog.length) return catalog; const legacy = JSON.parse(localStorage.getItem(legacyStorageKey) ?? 'null') as LayoutSnapshot | null; return legacy ? [{ ...legacy, metadata: { city: legacy.metadata?.city ?? location.city, areaType: legacy.metadata?.areaType ?? 'Ensaios', plannedSowingDate: legacy.metadata?.plannedSowingDate ?? '', detectionThreshold: legacy.metadata?.detectionThreshold ?? 1, mapId: 'mapa-1', mapName: legacy.metadata?.mapName ?? 'Mapa principal' } }] : []; } catch { return []; } });
   const [activeMapId, setActiveMapId] = useState(() => savedLayouts[0]?.metadata?.mapId ?? 'mapa-1');
   const [savedSnapshot, setSavedSnapshot] = useState<LayoutSnapshot | null>(() => savedLayouts[0] ?? null);
@@ -78,9 +93,7 @@ export default function FieldLayoutMap({ location, trials, harvestId, onClose, o
   const [allocations, setAllocations] = useState<TrialAllocation[]>(() => savedSnapshot?.allocations ?? []);
   const [plotIssues, setPlotIssues] = useState<Record<string, PlotIssue>>(() => savedSnapshot?.plotIssues ?? {});
   const [selectedPlotId, setSelectedPlotId] = useState('');
-  const [allocationCode, setAllocationCode] = useState('');
   const [allocationName, setAllocationName] = useState('');
-  const [allocationColor, setAllocationColor] = useState(palette[0]);
   const [rangeStart, setRangeStart] = useState('');
   const [rangeEnd, setRangeEnd] = useState('');
   const [issueKind, setIssueKind] = useState<IssueKind>('Observação');
@@ -179,7 +192,8 @@ export default function FieldLayoutMap({ location, trials, harvestId, onClose, o
       for (let excelRow = totalRowsExcel; excelRow >= 1; excelRow -= 1) {
         const row = worksheet.getRow(excelRow);
         for (let excelCol = 1; excelCol <= totalColumnsExcel; excelCol += 1) {
-          const rawValue = row.getCell(excelCol).value;
+          const cell = row.getCell(excelCol);
+          const rawValue = cell.value;
           if (rawValue === null || rawValue === undefined) continue;
           const structuredValue = typeof rawValue === 'object' ? rawValue as unknown as Record<string, unknown> : null;
           const resolvedValue = structuredValue
@@ -188,7 +202,7 @@ export default function FieldLayoutMap({ location, trials, harvestId, onClose, o
           const value = String(resolvedValue ?? '').trim();
           if (!value) continue;
           const prefix = value.toUpperCase().includes('PULV') ? 'PULV' : value.slice(0, 2);
-          next.push({ plotId: value, row: totalRowsExcel - excelRow + 1, col: excelCol, genotype: `Trat-${value}`, trialId: prefix, sourceTrialId: prefix });
+          next.push({ plotId: value, row: totalRowsExcel - excelRow + 1, col: excelCol, genotype: `Trat-${value}`, trialId: prefix, sourceTrialId: prefix, excelColor: excelFillColor(cell.fill) });
         }
       }
       if (!next.length) throw new Error('Nenhuma parcela foi encontrada na primeira aba do arquivo.');
@@ -263,11 +277,11 @@ export default function FieldLayoutMap({ location, trials, harvestId, onClose, o
     setIssueKind(issue?.kind ?? 'Observação'); setIssueNote(issue?.note ?? ''); setReplacementGenotype(issue?.replacementGenotype ?? '');
   }
   function applyAllocation() {
-    const code = allocationCode.trim(); const name = allocationName.trim();
+    const name = allocationName.trim();
     const ordered = [...plots].sort((a, b) => a.row - b.row || a.col - b.col);
     const startIndex = ordered.findIndex((plot) => plot.plotId === rangeStart.trim());
     const endIndex = ordered.findIndex((plot) => plot.plotId === rangeEnd.trim());
-    if (!code || !name || startIndex < 0 || endIndex < 0) { setImportError('Informe PlotIDs inicial e final existentes no croqui.'); return; }
+    if (!name || startIndex < 0 || endIndex < 0) { setImportError('Informe o nome do ensaio e PlotIDs inicial e final existentes no croqui.'); return; }
     const plotNumber = (value: string) => { const match = value.trim().match(/\d+(?:[.,]\d+)?(?!.*\d)/)?.[0]; return match ? Number(match.replace(',', '.')) : Number.NaN; };
     const startNumber = plotNumber(ordered[startIndex].plotId); const endNumber = plotNumber(ordered[endIndex].plotId);
     if (!Number.isFinite(startNumber) || !Number.isFinite(endNumber)) { setImportError('Os PlotIDs inicial e final precisam conter uma numeração Trat válida.'); return; }
@@ -275,9 +289,11 @@ export default function FieldLayoutMap({ location, trials, harvestId, onClose, o
     const selected = plots.filter((plot) => !isUtilityPlot(plot) && (() => { const value = plotNumber(plot.plotId); return Number.isFinite(value) && value >= minimum && value <= maximum; })());
     if (!selected.length) { setImportError('Nenhuma parcela foi encontrada dentro do intervalo informado.'); return; }
     const selectedIds = new Set(selected.map((plot) => plot.plotId));
-    const id = code.toUpperCase().replace(/[^A-Z0-9_-]+/g, '-');
+    const id = name.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase().replace(/[^A-Z0-9_-]+/g, '-').replace(/^-+|-+$/g, '') || `ENSAIO-${allocations.length + 1}`;
     const existing = allocations.find((allocation) => allocation.id === id);
-    const allocation: TrialAllocation = { id, code, name, startPlotId: ordered[startIndex].plotId, endPlotId: ordered[endIndex].plotId, color: allocationColor || existing?.color || palette[allocations.length % palette.length], plotCount: selectedIds.size };
+    const colorFrequency = selected.reduce<Record<string, number>>((frequency, plot) => { if (plot.excelColor) frequency[plot.excelColor] = (frequency[plot.excelColor] ?? 0) + 1; return frequency; }, {});
+    const importedColor = Object.entries(colorFrequency).sort((a, b) => b[1] - a[1])[0]?.[0];
+    const allocation: TrialAllocation = { id, code: name, name, startPlotId: ordered[startIndex].plotId, endPlotId: ordered[endIndex].plotId, color: importedColor || existing?.color || palette[allocations.length % palette.length], plotCount: selectedIds.size };
     setImportedPlots(plots.map((plot) => selectedIds.has(plot.plotId) ? { ...plot, trialId: id, allocationId: id, sourceTrialId: plot.sourceTrialId ?? plot.trialId } : plot));
     setAllocations([...allocations.filter((item) => item.id !== id), allocation]);
     setTrialLabels({ ...trialLabels, [id]: name }); setTrialVisibility({ ...trialVisibility, [id]: true }); setDirty(true); setSelectedPlotId(ordered[startIndex].plotId); setImportError('');
@@ -326,7 +342,7 @@ export default function FieldLayoutMap({ location, trials, harvestId, onClose, o
           <div className="layout-control layout-area-data"><h3>Dados da área</h3><label>Cidade<input disabled={!isEditing} value={city} onChange={(event) => setAndDirty(() => setCity(event.target.value))} placeholder="Município da área" /></label><label>Data prevista de semeadura<input disabled={!isEditing} type="date" value={plannedSowingDate} onChange={(event) => setAndDirty(() => setPlannedSowingDate(event.target.value))} /></label><label>Categoria da área<select disabled={!isEditing} value={areaType} onChange={(event) => setAndDirty(() => setAreaType(event.target.value))}>{areaTypes.map((type) => <option key={type}>{type}</option>)}</select></label>{areaType === 'Outro' && <label>Nova categoria<input disabled={!isEditing} value={customAreaType} onChange={(event) => setAndDirty(() => setCustomAreaType(event.target.value))} placeholder="Digite para salvar como nova opção" /></label>}<small className="layout-help">A data prevista gera o calendário fenológico quando o croqui for salvo.</small><div className={`layout-readiness ${city.trim() && plannedSowingDate && allocations.length ? 'ready' : ''}`}>{city.trim() && plannedSowingDate && allocations.length ? 'Pronto para gerar a base de gestão e o calendário.' : 'Complete cidade, semeadura e ao menos um ensaio para gerar o planejamento.'}</div></div>
           {savedAt && <div className="layout-linked"><span>✓ CROQUI VINCULADO</span><b>{location.name}</b><small>{harvestId} · salvo em {new Date(savedAt).toLocaleString('pt-BR')}</small>{isEditing && <button onClick={unlinkLayout}>Usar parcelas do cadastro</button>}</div>}
           <datalist id={`plot-options-${location.id}`}>{plots.map((plot) => <option key={plot.plotId} value={plot.plotId} />)}</datalist>
-          <div className="layout-control layout-allocation"><h3>Definição manual dos ensaios</h3><small className="layout-help">Informe o ensaio usando o número Trat inicial e final. PULV e LNX recebem cor automática; os demais usam a cor escolhida.</small>{isEditing && <div className={brokenSequencePlotIds.size ? 'sequence-diagnostic warning' : 'sequence-diagnostic'}><b>{brokenSequencePlotIds.size}</b><span>{brokenSequencePlotIds.size ? 'PlotIDs nas bordas de sequências interrompidas estão destacados em vermelho no mapa.' : 'Nenhuma quebra de sequência detectada.'}</span><label>Salto mínimo<input type="number" min="1" value={detectionThreshold} onChange={(event) => setDetectionThreshold(Number(event.target.value) || 1)} /></label></div>}{allocations.length > 0 && <div className="layout-allocation-list registration">{allocations.map((allocation) => <div key={allocation.id}><i style={{ background: allocation.color }} /><span><b>{allocation.code} · {allocation.name}</b><small>Trat inicial: {allocation.startPlotId} · Trat final: {allocation.endPlotId} · {allocation.plotCount} parcelas</small></span>{isEditing && <button className="allocation-delete" onClick={() => { if (window.confirm(`Remover o ensaio ${allocation.name} deste croqui?`)) removeAllocation(allocation.id); }}>Excluir</button>}</div>)}</div>}<details className="layout-advanced-detection" open><summary>Definir intervalo do ensaio</summary><div className="layout-input-grid"><label>Código do ensaio<input disabled={!isEditing} value={allocationCode} onChange={(event) => setAllocationCode(event.target.value)} placeholder="Ex.: VCU-01" /></label><label>Nome do ensaio<input disabled={!isEditing} value={allocationName} onChange={(event) => setAllocationName(event.target.value)} placeholder="Ex.: VCU I Precoce" /></label><label>Cor do ensaio<input disabled={!isEditing} type="color" value={allocationColor} onChange={(event) => setAllocationColor(event.target.value)} /></label></div><div className="layout-range-grid"><label>Trat / parcela inicial<input list={`plot-options-${location.id}`} disabled={!isEditing} value={rangeStart} onChange={(event) => setRangeStart(event.target.value)} /></label><button disabled={!isEditing || !selectedPlotId} onClick={() => setRangeStart(selectedPlotId)}>Usar selecionada</button><label>Trat / parcela final<input list={`plot-options-${location.id}`} disabled={!isEditing} value={rangeEnd} onChange={(event) => setRangeEnd(event.target.value)} /></label><button disabled={!isEditing || !selectedPlotId} onClick={() => setRangeEnd(selectedPlotId)}>Usar selecionada</button></div><button className="layout-action-button" disabled={!isEditing || !allocationCode.trim() || !allocationName.trim() || !rangeStart || !rangeEnd} onClick={applyAllocation}>Colorir e etiquetar ensaio</button></details></div>
+          <div className="layout-control layout-allocation"><h3>Definição manual dos ensaios</h3><small className="layout-help">Informe o nome e o número Trat inicial e final. A cor do ensaio será trazida do preenchimento das células do Excel; PULV e LNX mantêm suas cores automáticas.</small>{isEditing && <div className={brokenSequencePlotIds.size ? 'sequence-diagnostic warning' : 'sequence-diagnostic'}><b>{brokenSequencePlotIds.size}</b><span>{brokenSequencePlotIds.size ? 'PlotIDs nas bordas de sequências interrompidas estão destacados em vermelho no mapa.' : 'Nenhuma quebra de sequência detectada.'}</span><label>Salto mínimo<input type="number" min="1" value={detectionThreshold} onChange={(event) => setDetectionThreshold(Number(event.target.value) || 1)} /></label></div>}{allocations.length > 0 && <div className="layout-allocation-list registration">{allocations.map((allocation) => <div key={allocation.id}><i style={{ background: allocation.color }} /><span><b>{allocation.name}</b><small>Trat inicial: {allocation.startPlotId} · Trat final: {allocation.endPlotId} · {allocation.plotCount} parcelas</small></span>{isEditing && <button className="allocation-delete" onClick={() => { if (window.confirm(`Remover o ensaio ${allocation.name} deste croqui?`)) removeAllocation(allocation.id); }}>Excluir</button>}</div>)}</div>}<details className="layout-advanced-detection" open><summary>Definir intervalo do ensaio</summary><div className="layout-input-grid"><label>Nome do ensaio<input disabled={!isEditing} value={allocationName} onChange={(event) => setAllocationName(event.target.value)} placeholder="Ex.: VCU I Precoce" /></label></div><div className="layout-range-grid"><label>Trat / parcela inicial<input list={`plot-options-${location.id}`} disabled={!isEditing} value={rangeStart} onChange={(event) => setRangeStart(event.target.value)} /></label><button disabled={!isEditing || !selectedPlotId} onClick={() => setRangeStart(selectedPlotId)}>Usar selecionada</button><label>Trat / parcela final<input list={`plot-options-${location.id}`} disabled={!isEditing} value={rangeEnd} onChange={(event) => setRangeEnd(event.target.value)} /></label><button disabled={!isEditing || !selectedPlotId} onClick={() => setRangeEnd(selectedPlotId)}>Usar selecionada</button></div><button className="layout-action-button" disabled={!isEditing || !allocationName.trim() || !rangeStart || !rangeEnd} onClick={applyAllocation}>Colorir e etiquetar ensaio</button></details></div>
           <div className={`layout-control layout-occurrence ${selectedPlot ? 'selected' : ''}`}><h3>Ocorrência na implantação</h3>{selectedPlot ? <><div className="layout-selected-plot"><span>PARCELA SELECIONADA</span><b>{selectedPlot.plotId}</b><small>{trialName(selectedPlot.trialId)} · linha {selectedPlot.row}, coluna {selectedPlot.col}</small></div><label>Tipo<select disabled={!isEditing} value={issueKind} onChange={(event) => setIssueKind(event.target.value as IssueKind)}><option>Observação</option><option>Alerta</option><option>Troca de genótipo</option><option>Linha entupida</option><option>Falha de semeadura</option><option>Passada de pulverizador</option><option>Fitotoxidez</option><option>Parcela perdida</option><option>Outro</option></select></label>{issueKind === 'Troca de genótipo' && <label>Novo genótipo<input disabled={!isEditing} value={replacementGenotype} onChange={(event) => setReplacementGenotype(event.target.value)} placeholder="Identificação do substituto" /></label>}<label>Descrição<textarea disabled={!isEditing} value={issueNote} onChange={(event) => setIssueNote(event.target.value)} placeholder="Descreva o que ocorreu nesta parcela" /></label>{isEditing && <div className="layout-issue-actions"><button onClick={clearIssue} disabled={!plotIssues[selectedPlotId]}>Remover</button><button className="layout-action-button" onClick={saveIssue} disabled={!issueNote.trim()}>Salvar ocorrência</button></div>}</> : <small className="layout-help">Clique em uma parcela do mapa para selecioná-la e registrar uma observação ou alerta.</small>}{Object.keys(plotIssues).length > 0 && <div className="layout-issue-count"><b>{Object.keys(plotIssues).length}</b> parcelas com ocorrências registradas e vinculadas à qualidade</div>}</div>
           <div className="layout-control"><h3>Camada e identificação</h3><div className="segmented layout-map-options"><button disabled={!isEditing} className={mapStyle === 'satellite' ? 'active' : ''} onClick={() => setAndDirty(() => setMapStyle('satellite'))}>Esri</button><button disabled={!isEditing} className={mapStyle === 'google' ? 'active' : ''} onClick={() => setAndDirty(() => setMapStyle('google'))}>Google Earth</button><button disabled={!isEditing} className={mapStyle === 'street' ? 'active' : ''} onClick={() => setAndDirty(() => setMapStyle('street'))}>Mapa</button></div><label className="layout-check"><input type="checkbox" disabled={!isEditing} checked={showPlotIds} onChange={(event) => setAndDirty(() => setShowPlotIds(event.target.checked))} />Exibir PlotID nas parcelas</label><small className="layout-help">O nome do ensaio permanece sempre identificado em sua primeira parcela.</small></div>
           <div className="layout-control"><h3>Dimensões da parcela</h3><div className="layout-input-grid"><label>Comprimento<input disabled={!isEditing} type="number" min=".5" step=".5" value={plotLength} onChange={(event) => setAndDirty(() => setPlotLength(Number(event.target.value)))} /></label><label>Largura<input disabled={!isEditing} type="number" min=".2" step=".1" value={plotWidth} onChange={(event) => setAndDirty(() => setPlotWidth(Number(event.target.value)))} /></label><label>Espaçamento<input disabled={!isEditing} type="number" min="0" step=".1" value={gapLength} onChange={(event) => setAndDirty(() => setGapLength(Number(event.target.value)))} /></label><label>Entrelinhas<input disabled={!isEditing} type="number" min="0" step=".1" value={gapWidth} onChange={(event) => setAndDirty(() => setGapWidth(Number(event.target.value)))} /></label></div></div>
