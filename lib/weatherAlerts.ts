@@ -139,7 +139,7 @@ async function fetchHistory(latitude: number, longitude: number, model: typeof w
 async function fetchWeek(latitude: number, longitude: number) {
   const query = new URLSearchParams({
     latitude: String(latitude), longitude: String(longitude),
-    daily: 'weather_code,precipitation_sum,temperature_2m_max,temperature_2m_min', forecast_days: '7', timezone: 'America/Sao_Paulo',
+    daily: 'weather_code,precipitation_sum,temperature_2m_max,temperature_2m_min', forecast_days: '10', timezone: 'America/Sao_Paulo',
   });
   const response = await fetch(`https://api.open-meteo.com/v1/forecast?${query}`);
   if (!response.ok) throw new Error(`Previsão semanal: resposta ${response.status}`);
