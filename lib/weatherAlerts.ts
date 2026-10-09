@@ -11,6 +11,32 @@ export type WeatherModelCondition = {
   observedAt: string;
 };
 
+export type WeatherHistorySource = {
+  id: string;
+  name: string;
+  available: boolean;
+  accumulatedPrecipitation: number;
+  stormDays: number;
+  hailDays: number;
+};
+
+export type WeatherEvent = {
+  date: string;
+  type: 'Tempestade' | 'Granizo';
+  sources: string[];
+  precipitation: number;
+  gust: number;
+};
+
+export type WeatherDay = {
+  date: string;
+  condition: string;
+  weatherCode: number;
+  precipitation: number;
+  temperatureMax: number;
+  temperatureMin: number;
+};
+
 export type LocationWeather = {
   locationId: string;
   locationName: string;
@@ -19,6 +45,11 @@ export type LocationWeather = {
   temperature: number;
   precipitation: number;
   sources: WeatherModelCondition[];
+  sowingDate?: string;
+  accumulatedPrecipitation?: number;
+  historySources?: WeatherHistorySource[];
+  events?: WeatherEvent[];
+  week?: WeatherDay[];
 };
 
 const weatherModels = [
@@ -35,6 +66,17 @@ type CurrentResponse = {
     precipitation?: number;
     weather_code?: number;
     wind_gusts_10m?: number;
+  };
+};
+
+type DailyResponse = {
+  daily?: {
+    time?: string[];
+    weather_code?: number[];
+    precipitation_sum?: number[];
+    wind_gusts_10m_max?: number[];
+    temperature_2m_max?: number[];
+    temperature_2m_min?: number[];
   };
 };
 
@@ -81,13 +123,43 @@ async function fetchModel(latitude: number, longitude: number, model: typeof wea
   } satisfies WeatherModelCondition;
 }
 
-export async function fetchWeatherConditions(locations: Array<{ id: string; name: string; lat: number; lng: number }>) {
+async function fetchHistory(latitude: number, longitude: number, model: typeof weatherModels[number], startDate: string, endDate: string) {
+  const query = new URLSearchParams({
+    latitude: String(latitude), longitude: String(longitude), start_date: startDate, end_date: endDate,
+    daily: 'weather_code,precipitation_sum,wind_gusts_10m_max', timezone: 'America/Sao_Paulo', models: model.id,
+  });
+  const response = await fetch(`https://historical-forecast-api.open-meteo.com/v1/forecast?${query}`);
+  if (!response.ok) throw new Error(`${model.name} histórico: resposta ${response.status}`);
+  const daily = (await response.json() as DailyResponse).daily;
+  if (!daily) throw new Error(`${model.name}: histórico indisponível`);
+  const days = (daily.time ?? []).map((date, index) => ({ date, weatherCode: Number(daily.weather_code?.[index] ?? 0), precipitation: Math.round(Number(daily.precipitation_sum?.[index] ?? 0) * 10) / 10, gust: Math.round(Number(daily.wind_gusts_10m_max?.[index] ?? 0)) }));
+  return { model, days, accumulatedPrecipitation: Math.round(days.reduce((sum, day) => sum + day.precipitation, 0) * 10) / 10 };
+}
+
+async function fetchWeek(latitude: number, longitude: number) {
+  const query = new URLSearchParams({
+    latitude: String(latitude), longitude: String(longitude),
+    daily: 'weather_code,precipitation_sum,temperature_2m_max,temperature_2m_min', forecast_days: '7', timezone: 'America/Sao_Paulo',
+  });
+  const response = await fetch(`https://api.open-meteo.com/v1/forecast?${query}`);
+  if (!response.ok) throw new Error(`Previsão semanal: resposta ${response.status}`);
+  const daily = (await response.json() as DailyResponse).daily;
+  return (daily?.time ?? []).map((date, index): WeatherDay => {
+    const weatherCode = Number(daily?.weather_code?.[index] ?? 0);
+    return { date, weatherCode, condition: weatherCodeLabel(weatherCode), precipitation: Math.round(Number(daily?.precipitation_sum?.[index] ?? 0) * 10) / 10, temperatureMax: Math.round(Number(daily?.temperature_2m_max?.[index] ?? 0)), temperatureMin: Math.round(Number(daily?.temperature_2m_min?.[index] ?? 0)) };
+  });
+}
+
+export async function fetchWeatherConditions(locations: Array<{ id: string; name: string; lat: number; lng: number }>, sowingDates: Record<string, string> = {}) {
   const checkedAt = new Date().toISOString();
+  const today = checkedAt.slice(0, 10);
+  const yesterdayDate = new Date(`${today}T12:00:00`); yesterdayDate.setDate(yesterdayDate.getDate() - 1);
+  const yesterday = yesterdayDate.toISOString().slice(0, 10);
   const snapshots: LocationWeather[] = [];
   const errors: string[] = [];
   for (const location of locations) {
-    const settled = await Promise.allSettled(weatherModels.map((model) => fetchModel(location.lat, location.lng, model)));
-    const sources = settled.map((result, index): WeatherModelCondition => {
+    const [currentSettled, weekSettled] = await Promise.all([Promise.allSettled(weatherModels.map((model) => fetchModel(location.lat, location.lng, model))), Promise.allSettled([fetchWeek(location.lat, location.lng)])]);
+    const sources = currentSettled.map((result, index): WeatherModelCondition => {
       if (result.status === 'fulfilled') return result.value;
       errors.push(`${location.name} · ${weatherModels[index].name}: ${String(result.reason)}`);
       return { id: weatherModels[index].id, name: weatherModels[index].name, available: false, condition: 'Indisponível', weatherCode: -1, temperature: 0, humidity: 0, precipitation: 0, gust: 0, observedAt: checkedAt };
@@ -95,7 +167,16 @@ export async function fetchWeatherConditions(locations: Array<{ id: string; name
     const available = sources.filter((source) => source.available);
     const mostFrequentCondition = [...new Set(available.map((source) => source.condition))].sort((a, b) => available.filter((source) => source.condition === b).length - available.filter((source) => source.condition === a).length)[0] ?? 'Sem dados';
     const average = (key: 'temperature' | 'precipitation') => available.length ? Math.round(available.reduce((sum, source) => sum + source[key], 0) / available.length * 10) / 10 : 0;
-    snapshots.push({ locationId: location.id, locationName: location.name, checkedAt, condition: mostFrequentCondition, temperature: average('temperature'), precipitation: average('precipitation'), sources });
+    const sowingDate = sowingDates[location.id];
+    const historySettled = sowingDate && sowingDate <= yesterday ? await Promise.allSettled(weatherModels.map((model) => fetchHistory(location.lat, location.lng, model, sowingDate, yesterday))) : [];
+    const histories = historySettled.flatMap((result, index) => { if (result.status === 'fulfilled') return [result.value]; errors.push(`${location.name} · ${weatherModels[index].name}: ${String(result.reason)}`); return []; });
+    const historySources = weatherModels.map((model) => { const history = histories.find((item) => item.model.id === model.id); return { id: model.id, name: model.name, available: Boolean(history), accumulatedPrecipitation: history?.accumulatedPrecipitation ?? 0, stormDays: history?.days.filter((day) => day.weatherCode >= 95).length ?? 0, hailDays: history?.days.filter((day) => day.weatherCode === 96 || day.weatherCode === 99).length ?? 0 } satisfies WeatherHistorySource; });
+    const eventDates = new Set(histories.flatMap((history) => history.days.filter((day) => day.weatherCode >= 95).map((day) => day.date)));
+    const events = [...eventDates].sort((a, b) => b.localeCompare(a)).map((date): WeatherEvent => { const matches = histories.flatMap((history) => history.days.filter((day) => day.date === date && day.weatherCode >= 95).map((day) => ({ ...day, source: history.model.name }))); const hail = matches.some((day) => day.weatherCode === 96 || day.weatherCode === 99); return { date, type: hail ? 'Granizo' : 'Tempestade', sources: matches.map((day) => day.source), precipitation: Math.max(0, ...matches.map((day) => day.precipitation)), gust: Math.max(0, ...matches.map((day) => day.gust)) }; });
+    const accumulatedPrecipitation = histories.length ? Math.round(histories.reduce((sum, history) => sum + history.accumulatedPrecipitation, 0) / histories.length * 10) / 10 : 0;
+    const week = weekSettled[0]?.status === 'fulfilled' ? weekSettled[0].value : [];
+    if (weekSettled[0]?.status === 'rejected') errors.push(`${location.name} · previsão semanal: ${String(weekSettled[0].reason)}`);
+    snapshots.push({ locationId: location.id, locationName: location.name, checkedAt, condition: mostFrequentCondition, temperature: average('temperature'), precipitation: average('precipitation'), sources, sowingDate, accumulatedPrecipitation, historySources, events, week });
   }
   return { snapshots, errors, checkedAt };
 }

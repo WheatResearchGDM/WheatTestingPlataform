@@ -23,7 +23,7 @@ type ActivityStream = 'operational' | 'field';
 type MacroGroup = 'Ensaios' | 'Coleção' | 'Founder' | 'PD' | 'Multiqualidades' | 'Outro';
 type MacroStage = 'Semeadura' | 'Condução' | 'Colheita';
 type PhenologyVisit = 'Semeadura' | 'Perfilhamento' | 'Alongamento' | 'Emborrachamento' | 'Espigamento' | 'Enchimento de grão' | 'Maturidade';
-type Activity = { id: number; date: string; trial: string; type: string; owner: string; notes: string; plannedId?: string; qualityScore?: number; qualityClass?: string; locationId?: string; scope?: string; macroGroup?: MacroGroup; macroStage?: MacroStage; checks?: string[]; photos?: string[]; details?: Record<string, string>; alertCategory?: string; qualityPenalty?: number; plotIds?: string[] };
+type Activity = { id: number; date: string; trial: string; type: string; owner: string; notes: string; stream?: ActivityStream; plannedId?: string; qualityScore?: number; qualityClass?: string; locationId?: string; scope?: string; macroGroup?: MacroGroup; macroStage?: MacroStage; checks?: string[]; photos?: string[]; details?: Record<string, string>; alertCategory?: string; qualityPenalty?: number; plotIds?: string[] };
 type PlannedActivity = { id: string; trialId: string; locationId?: string; areaCategory?: string; activityTemplateId?: string; activity: string; category: string; start: string; end: string; owner: string; priority: string; status: string; notes: string; originalStart: string; originalEnd: string; version: number };
 type Trial = { id: string; name: string; type: string; subtype?: string; year: number; cycle: string; locationId: string; plots: number; sowing: string; harvest: string; owner: string; rawStatus: string; priority: string; notes: string; place: string; city: string; status: string; progress: number; next: string; nextDate: string; date: string; fieldName?: string; area?: number; mapId?: string; areaCategory?: string; issueCount?: number; affectedPlots?: string[]; lostPlots?: string[]; layoutPenalty?: number };
 type ViewContext = { locationId?: string; operational?: 'ok' | 'late' };
@@ -137,6 +137,26 @@ function qualityTone(score: number): Exclude<NonNullable<NetworkLocation['qualit
   return score >= 85 ? 'excellent' : score >= 70 ? 'adequate' : score >= 50 ? 'attention' : 'critical';
 }
 
+function activityDateIso(value: string) {
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
+  const parts = value.split('/');
+  return parts.length === 3 ? parts.reverse().join('-') : value.slice(0, 10);
+}
+
+function actualSowingDate(trial: Trial, activities: Activity[], schedule: PlannedActivity[]) {
+  const records = activities.filter((activity) => {
+    const plan = schedule.find((item) => item.id === activity.plannedId);
+    const stream = activity.stream ?? (activity.details?.fluxo as ActivityStream | undefined) ?? (plan ? activityStreamFor(plan) : undefined);
+    if (stream !== 'operational' || activity.macroStage !== 'Semeadura' || activity.details?.condicao_operacao === 'Não executado') return false;
+    if (activity.trial === trial.id) return true;
+    if (activity.locationId !== trial.locationId) return false;
+    if (activity.scope === 'Área total') return true;
+    const sameCategory = activity.details?.categoria_area && activity.details.categoria_area === (trial.areaCategory ?? trial.type);
+    return sameCategory || activity.macroGroup === macroGroupFor(trial);
+  });
+  return records.map((record) => activityDateIso(record.date)).filter(Boolean).sort()[0];
+}
+
 function rhaCode(value?: string) {
   const number = String(value ?? '').match(/[123]/)?.[0] ?? '1';
   return `RHA_${number}`;
@@ -148,9 +168,10 @@ function rhaLabel(value?: string) {
 
 function localityOverview(locationId: string, trialList: Trial[], activities: Activity[], schedule: PlannedActivity[]) {
   const localTrials = trialList.filter((trial) => trial.locationId === locationId);
-  const planted = localTrials.filter((trial) => trial.sowing <= sourceSummary.importedAt).length;
+  const actualSowingDates = new Map(localTrials.map((trial) => [trial.id, actualSowingDate(trial, activities, schedule)]));
+  const planted = localTrials.filter((trial) => Boolean(actualSowingDates.get(trial.id))).length;
   const plantedPercent = localTrials.length ? Math.round((planted / localTrials.length) * 100) : 0;
-  const stages = localTrials.filter((trial) => trial.sowing <= sourceSummary.importedAt).map(phenologicalStage);
+  const stages = localTrials.flatMap((trial) => { const sowingDate = actualSowingDates.get(trial.id); return sowingDate ? [phenologicalStage(trial, sowingDate)] : []; });
   const stage = stages.sort((a, b) => stages.filter((item) => item === b).length - stages.filter((item) => item === a).length)[0] ?? 'Pré-semeadura';
   const quality = localTrials.length ? Math.round(localTrials.reduce((sum, trial) => sum + trialQuality(trial, activities).score, 0) / localTrials.length) : 0;
   const ids = new Set(localTrials.map((trial) => trial.id));
@@ -159,15 +180,15 @@ function localityOverview(locationId: string, trialList: Trial[], activities: Ac
     const items = localPlan.filter(matcher);
     return items.length ? Math.round((items.filter((item) => item.status === 'Concluído').length / items.length) * 100) : fallback;
   };
-  const sowing = Math.max(plantedPercent, completion((item) => /seme|identifica|etiqueta/i.test(`${item.activity} ${item.category}`), plantedPercent));
+  const sowing = plantedPercent;
   const conduction = completion((item) => !/seme|identifica|etiqueta|colhe/i.test(`${item.activity} ${item.category}`), plantedPercent > 0 ? 35 : 0);
   const harvest = Math.max(Math.round((localTrials.filter((trial) => trial.harvest <= sourceSummary.importedAt).length / Math.max(localTrials.length, 1)) * 100), completion((item) => /colhe/i.test(`${item.activity} ${item.category}`), 0));
   const groups = [...new Set(localTrials.map(macroGroupFor))];
   return { localTrials, planted, plantedPercent, stage, quality, tone: qualityTone(quality), sowing, conduction, harvest, groups };
 }
 
-function phenologicalStage(trial: Trial) {
-  const days = daysBetween(trial.sowing, sourceSummary.importedAt);
+function phenologicalStage(trial: Trial, sowingDate = trial.sowing) {
+  const days = daysBetween(sowingDate, new Date().toISOString().slice(0, 10));
   if (days < 0) return 'Pré-semeadura';
   if (days <= 10) return 'Emergência';
   if (days <= 25) return 'Perfilhamento';
@@ -280,10 +301,10 @@ export default function Home() {
   const [pendingSync, setPendingSync] = useState(() => typeof window === 'undefined' ? 0 : Number(localStorage.getItem('field-wheat-pending-sync-v1') ?? 0));
   const [weatherConditions, setWeatherConditions] = useState<LocationWeather[]>(() => {
     if (typeof window === 'undefined') return [];
-    try { return JSON.parse(localStorage.getItem('field-wheat-weather-conditions-v1') ?? '[]'); } catch { return []; }
+    try { return JSON.parse(localStorage.getItem('field-wheat-weather-conditions-v2') ?? '[]'); } catch { return []; }
   });
   const [weatherChecking, setWeatherChecking] = useState(false);
-  const [weatherCheckedAt, setWeatherCheckedAt] = useState(() => typeof window === 'undefined' ? '' : localStorage.getItem('field-wheat-weather-checked-v1') ?? '');
+  const [weatherCheckedAt, setWeatherCheckedAt] = useState(() => typeof window === 'undefined' ? '' : localStorage.getItem('field-wheat-weather-checked-v2') ?? '');
   const activeHarvest = harvests.find((harvest) => harvest.id === activeHarvestId) ?? harvests[0];
 
   function updateActivityFields(next: DynamicField[]) {
@@ -300,10 +321,11 @@ export default function Home() {
     if (!locations.length || weatherChecking) return;
     setWeatherChecking(true);
     try {
-      const result = await fetchWeatherConditions(locations);
+      const sowingDates = Object.fromEntries(locations.flatMap((location) => { const dates = allTrials.filter((trial) => trial.locationId === location.id).map((trial) => actualSowingDate(trial, activities, schedule)).filter((date): date is string => Boolean(date)).sort(); return dates[0] ? [[location.id, dates[0]]] : []; }));
+      const result = await fetchWeatherConditions(locations, sowingDates);
       setWeatherConditions(result.snapshots); setWeatherCheckedAt(result.checkedAt);
-      localStorage.setItem('field-wheat-weather-conditions-v1', JSON.stringify(result.snapshots));
-      localStorage.setItem('field-wheat-weather-checked-v1', result.checkedAt);
+      localStorage.setItem('field-wheat-weather-conditions-v2', JSON.stringify(result.snapshots));
+      localStorage.setItem('field-wheat-weather-checked-v2', result.checkedAt);
       setToast(`Condições climáticas atualizadas para ${result.snapshots.length} localidade(s).`);
       if (result.errors.length) console.warn('Fontes meteorológicas indisponíveis:', result.errors);
     } catch { setToast('Não foi possível consultar as fontes meteorológicas agora.'); }
@@ -452,6 +474,7 @@ export default function Home() {
       type: String(data.get('visitStage') || macroStage),
       owner: currentUser?.name ?? 'Igor',
       notes: String(data.get('notes')) || 'Atividade registrada sem observações.',
+      stream: recordStream,
       plannedId: plannedId || undefined,
       qualityScore: recordStream === 'field' ? quality.score : undefined,
       qualityClass: recordStream === 'field' ? quality.label : undefined,
@@ -464,7 +487,7 @@ export default function Home() {
       alertCategory: alertCategory || undefined,
       qualityPenalty: penalty || undefined,
       plotIds: String(data.get('adversePlotIds') || '').split(/[;,\s]+/).map((item) => item.trim()).filter(Boolean),
-      details: { categoria_area: areaCategory, estadio: String(data.get('visitStage') || data.get('stage') || ''), fluxo: activityStreamFor(schedule.find((item) => item.id === plannedId)), enchimento_plantado: String(data.get('fillPlanted') || ''), produto: String(data.get('product') || ''), dose: String(data.get('dose') || ''), estabelecimento: String(establishment), uniformidade: String(uniformity), daninhas: String(weeds), doencas: String(disease), controle_daninhas: String(data.get('weedControl') || ''), oidio: String(data.get('oidio') || ''), ferrugem: String(data.get('ferrugem') || ''), manchas: String(data.get('manchas') || ''), ocorrencia: String(data.get('adverseDescription') || ''), quantidade_afetada: String(adverseQuantity), ...Object.fromEntries([...data.entries()].filter(([key]) => key.startsWith('dynamic-')).map(([key, value]) => [key.slice(8), String(value)])) },
+      details: { categoria_area: areaCategory, estadio: String(data.get('visitStage') || data.get('stage') || ''), fluxo: recordStream, condicao_operacao: String(data.get('condition') || ''), enchimento_plantado: String(data.get('fillPlanted') || ''), produto: String(data.get('product') || ''), dose: String(data.get('dose') || ''), estabelecimento: String(establishment), uniformidade: String(uniformity), daninhas: String(weeds), doencas: String(disease), controle_daninhas: String(data.get('weedControl') || ''), oidio: String(data.get('oidio') || ''), ferrugem: String(data.get('ferrugem') || ''), manchas: String(data.get('manchas') || ''), ocorrencia: String(data.get('adverseDescription') || ''), quantidade_afetada: String(adverseQuantity), ...Object.fromEntries([...data.entries()].filter(([key]) => key.startsWith('dynamic-')).map(([key, value]) => [key.slice(8), String(value)])) },
     };
     const updated = [next, ...activities];
     setActivities(updated);
@@ -544,7 +567,7 @@ export default function Home() {
       setDataVersion((value) => value + 1);
       setToast(`${imported.length} ensaios carregados e vinculados aos campos.`);
     } else if (dataset === 'Atividades') {
-      const imported = rows.map((row, index): Activity => ({ id: Date.now() + index, date: String(row.data ?? ''), trial: String(row.ensaio_id ?? ''), type: String(row.etapa ?? 'Visita'), owner: String(row.responsavel ?? 'Equipe de campo'), notes: String(row.observacoes ?? ''), locationId: String(row.localidade_id ?? ''), qualityScore: Number(row.nota_qualidade ?? 0) || undefined, qualityClass: String(row.classificacao ?? '') || undefined }));
+      const imported = rows.map((row, index): Activity => { const stage = String(row.etapa ?? 'Visita'); const stream: ActivityStream = /semeadura|aduba|aplica|colheita/i.test(stage) ? 'operational' : 'field'; return { id: Date.now() + index, date: String(row.data ?? ''), trial: String(row.ensaio_id ?? ''), type: stage, stream, owner: String(row.responsavel ?? 'Equipe de campo'), notes: String(row.observacoes ?? ''), locationId: String(row.localidade_id ?? ''), macroStage: /semeadura/i.test(stage) ? 'Semeadura' : /colheita|maturidade/i.test(stage) ? 'Colheita' : 'Condução', qualityScore: Number(row.nota_qualidade ?? 0) || undefined, qualityClass: String(row.classificacao ?? '') || undefined }; });
       setActivities(imported);
       localStorage.setItem('field-wheat-activities-clean-v1', JSON.stringify(imported));
       setToast(`${imported.length} registros de atividade carregados.`);
@@ -580,7 +603,9 @@ export default function Home() {
       const maxDisease = Math.max(Number(row.oidio_nota) || 0, Number(row.ferrugem_nota) || 0, Number(row.manchas_nota) || 0, 1);
       const calculated = qualityFrom({ establishment: Number(row.estabelecimento_nota) || 3, uniformity: Number(row.uniformidade_nota) || 3, weeds: Number(row.daninhas_nota) || 3, disease: maxDisease });
       const qualityScore = score ?? calculated.score;
-      return { id: Date.now() + index, date: formatDate(date(row.data_realizada)), trial: clean(row.ensaio_codigo), type: clean(row.estadio_fenologico) || 'Visita', owner: clean(row.responsavel) || 'Equipe de campo', notes: clean(row.observacoes) || 'Registro importado da planilha unificada', plannedId: clean(row.visita_codigo), qualityScore, qualityClass: clean(row.classificacao) || (qualityScore >= 85 ? 'Excelente' : qualityScore >= 70 ? 'Adequado' : qualityScore >= 50 ? 'Atenção' : 'Crítico'), locationId: clean(row.local_codigo), macroGroup: (clean(row.grupo) || 'Outro') as MacroGroup, macroStage: (/semeadura/i.test(clean(row.estadio_fenologico)) ? 'Semeadura' : /maturidade|colheita/i.test(clean(row.estadio_fenologico)) ? 'Colheita' : 'Condução') as MacroStage, checks: clean(row.checklist_concluido) ? [clean(row.checklist_concluido)] : [], photos: clean(row.fotos) ? clean(row.fotos).split(/[;,]/).map((item) => item.trim()).filter(Boolean) : [], details: { estabelecimento: clean(row.estabelecimento_nota), uniformidade: clean(row.uniformidade_nota), daninhas: clean(row.daninhas_nota), controle_daninhas: clean(row.controle_daninhas), oidio: clean(row.oidio_nota), ferrugem: clean(row.ferrugem_nota), manchas: clean(row.manchas_nota), qualidade_grupo: clean(row.qualidade_grupo_nota) } };
+      const stage = clean(row.estadio_fenologico) || 'Visita';
+      const stream: ActivityStream = /operacional/i.test(clean(row.tipo_registro)) || /semeadura|aduba|aplica|colheita/i.test(stage) ? 'operational' : 'field';
+      return { id: Date.now() + index, date: formatDate(date(row.data_realizada)), trial: clean(row.ensaio_codigo), type: stage, stream, owner: clean(row.responsavel) || 'Equipe de campo', notes: clean(row.observacoes) || 'Registro importado da planilha unificada', plannedId: clean(row.visita_codigo), qualityScore, qualityClass: clean(row.classificacao) || (qualityScore >= 85 ? 'Excelente' : qualityScore >= 70 ? 'Adequado' : qualityScore >= 50 ? 'Atenção' : 'Crítico'), locationId: clean(row.local_codigo), macroGroup: (clean(row.grupo) || 'Outro') as MacroGroup, macroStage: (/semeadura/i.test(stage) ? 'Semeadura' : /maturidade|colheita/i.test(stage) ? 'Colheita' : 'Condução') as MacroStage, checks: clean(row.checklist_concluido) ? [clean(row.checklist_concluido)] : [], photos: clean(row.fotos) ? clean(row.fotos).split(/[;,]/).map((item) => item.trim()).filter(Boolean) : [], details: { fluxo: stream, estabelecimento: clean(row.estabelecimento_nota), uniformidade: clean(row.uniformidade_nota), daninhas: clean(row.daninhas_nota), controle_daninhas: clean(row.controle_daninhas), oidio: clean(row.oidio_nota), ferrugem: clean(row.ferrugem_nota), manchas: clean(row.manchas_nota), qualidade_grupo: clean(row.qualidade_grupo_nota) } };
     });
     importedLocations.forEach((location) => { const localTrials = importedTrials.filter((trial) => trial.locationId === location.id); location.trials = localTrials.length; location.plots = localTrials.reduce((sum, trial) => sum + trial.plots, 0); });
     locations.splice(0, locations.length, ...importedLocations);
@@ -876,7 +901,7 @@ function Dashboard({ trialList, activities, schedule, harvests, activeHarvestId,
     const overview = localityOverview(location.id, trialList, activities, schedule);
     return overview.localTrials.length ? { ...location, qualityTone: overview.tone, qualityScore: overview.quality, plantedPercent: overview.plantedPercent, phenologicalStage: overview.stage, alertCount: alertCountFor(location.id) } : { ...location, qualityTone: 'neutral', plantedPercent: 0, phenologicalStage: 'Sem ensaios', alertCount: 0 };
   });
-  const totalPlanted = trialList.filter((trial) => trial.sowing <= sourceSummary.importedAt).length;
+  const totalPlanted = trialList.filter((trial) => Boolean(actualSowingDate(trial, activities, schedule))).length;
   const plantedPercent = trialList.length ? Math.round((totalPlanted / trialList.length) * 100) : 0;
   const qualityByRegion = (region: string) => {
     const locationIds = new Set(locations.filter((location) => rhaCode(location.rha || location.region) === region).map((location) => location.id));
@@ -954,19 +979,24 @@ function weatherSymbol(condition: string) {
   return '◌';
 }
 
+function WeatherWeekCalendar({ weather, compact = false }: { weather: LocationWeather; compact?: boolean }) {
+  const week = weather.week ?? [];
+  return <section className={`weather-week ${compact ? 'compact' : ''}`}><header><div><small>PRÓXIMOS 7 DIAS</small><b>Condição da semana</b></div><span>Precipitação prevista</span></header>{week.length ? <div className="weather-week-days">{week.map((day) => { const date = new Date(`${day.date}T12:00:00`); return <article key={day.date} title={day.condition}><small>{date.toLocaleDateString('pt-BR', { weekday: 'short' }).replace('.', '')}</small><b>{date.getDate()}</b><i>{weatherSymbol(day.condition)}</i><span>{day.temperatureMin}° / {day.temperatureMax}°</span><em>{day.precipitation.toFixed(1)} mm</em></article>; })}</div> : <p className="weather-week-empty">Previsão semanal indisponível nesta consulta.</p>}</section>;
+}
+
 function WeatherScreen({ weatherConditions, weatherChecking, weatherCheckedAt, onRefresh }: { weatherConditions: LocationWeather[]; weatherChecking: boolean; weatherCheckedAt: string; onRefresh: () => void }) {
   const [selected, setSelected] = useState(locations[0]?.id ?? '');
   const current = weatherConditions.find((weather) => weather.locationId === selected) ?? weatherConditions[0];
   const displayLocations: NetworkLocation[] = locations.map((location) => ({ ...location, qualityTone: 'neutral', weather: weatherConditions.find((weather) => weather.locationId === location.id) }));
-  return <><PageHead eyebrow="Meteorologia por local" title="Condições climáticas" copy="Comparação das condições atuais informadas por ECMWF/IFS, NOAA/GFS e DWD/ICON para cada local cadastrado." action={<button className="primary-button" type="button" disabled={weatherChecking} onClick={onRefresh}>{weatherChecking ? 'Consultando as plataformas…' : 'Atualizar condições'}</button>} />
+  return <><PageHead eyebrow="Meteorologia por local" title="Condições climáticas" copy="Condição atual, previsão semanal e histórico desde a semeadura operacional, comparando ECMWF/IFS, NOAA/GFS e DWD/ICON." action={<button className="primary-button" type="button" disabled={weatherChecking} onClick={onRefresh}>{weatherChecking ? 'Consultando as plataformas…' : 'Atualizar condições'}</button>} />
     {weatherCheckedAt && <div className="weather-updated">Última atualização: {new Date(weatherCheckedAt).toLocaleString('pt-BR')}</div>}
-    <section className="weather-map-layout"><div className="card weather-map-card"><NetworkMap locations={displayLocations} onSelect={setSelected} /></div><aside className="card weather-detail-panel">{current ? <><div className="weather-location-title"><span>{weatherSymbol(current.condition)}</span><div><small>LOCAL SELECIONADO</small><h2>{current.locationName}</h2><p>{current.temperature.toFixed(1)}°C · {current.condition}</p></div></div><div className="weather-source-list">{current.sources.map((source) => <article className={!source.available ? 'unavailable' : ''} key={source.id}><header><b>{source.name}</b><span>{source.available ? weatherSymbol(source.condition) : '—'}</span></header>{source.available ? <><strong>{source.temperature.toFixed(1)}°C</strong><p>{source.condition}</p><div><small>Chuva <b>{source.precipitation.toFixed(1)} mm</b></small><small>Umidade <b>{source.humidity}%</b></small><small>Rajada <b>{source.gust} km/h</b></small></div></> : <p>Plataforma temporariamente indisponível.</p>}</article>)}</div></> : <div className="empty-weather"><span>☁</span><h2>Dados ainda não consultados</h2><p>Atualize as condições para visualizar as três plataformas em todos os locais cadastrados.</p></div>}</aside></section>
+    <section className="weather-map-layout"><div className="card weather-map-card"><NetworkMap locations={displayLocations} onSelect={setSelected} /></div><aside className="card weather-detail-panel">{current ? <><div className="weather-location-title"><span>{weatherSymbol(current.condition)}</span><div><small>LOCAL SELECIONADO</small><h2>{current.locationName}</h2><p>{current.temperature.toFixed(1)}°C · {current.condition}</p></div></div><div className="weather-source-list">{current.sources.map((source) => <article className={!source.available ? 'unavailable' : ''} key={source.id}><header><b>{source.name}</b><span>{source.available ? weatherSymbol(source.condition) : '—'}</span></header>{source.available ? <><strong>{source.temperature.toFixed(1)}°C</strong><p>{source.condition}</p><div><small>Chuva <b>{source.precipitation.toFixed(1)} mm</b></small><small>Umidade <b>{source.humidity}%</b></small><small>Rajada <b>{source.gust} km/h</b></small></div></> : <p>Plataforma temporariamente indisponível.</p>}</article>)}</div><WeatherWeekCalendar weather={current} /><section className="weather-history-report"><header><div><small>RELATÓRIO POR LOCALIDADE</small><h3>Histórico desde a semeadura</h3></div>{current.sowingDate && <time>{formatDate(current.sowingDate)} até hoje</time>}</header>{current.sowingDate ? <><div className="weather-history-total"><span>💧</span><div><strong>{(current.accumulatedPrecipitation ?? 0).toFixed(1)} mm</strong><small>precipitação acumulada · média das fontes disponíveis</small></div></div><div className="weather-history-sources">{(current.historySources ?? []).map((source) => <article className={!source.available ? 'unavailable' : ''} key={source.id}><b>{source.name}</b>{source.available ? <><strong>{source.accumulatedPrecipitation.toFixed(1)} mm</strong><small>{source.stormDays} dia(s) com tempestade · {source.hailDays} com granizo</small></> : <small>Histórico indisponível</small>}</article>)}</div><div className="weather-event-list"><h4>Alertas no período</h4>{(current.events ?? []).length ? (current.events ?? []).map((event) => <article className={event.type === 'Granizo' ? 'hail' : 'storm'} key={event.date}><span>{event.type === 'Granizo' ? '◆' : '⚡'}</span><div><b>{event.type} · {formatDate(event.date)}</b><small>{event.sources.join(', ')} · chuva máx. {event.precipitation.toFixed(1)} mm · rajada máx. {event.gust} km/h</small></div></article>) : <p>Nenhuma tempestade ou ocorrência de granizo foi indicada pelos modelos no período.</p>}</div></> : <div className="weather-awaiting-sowing"><span>🌱</span><div><b>Aguardando semeadura operacional</b><p>O acumulado e os alertas históricos começam após o registro operacional de semeadura deste local.</p></div></div>}</section></> : <div className="empty-weather"><span>☁</span><h2>Dados ainda não consultados</h2><p>Atualize as condições para visualizar as três plataformas em todos os locais cadastrados.</p></div>}</aside></section>
     <section className="weather-location-grid">{weatherConditions.map((weather) => <button className={weather.locationId === current?.locationId ? 'card active' : 'card'} key={weather.locationId} onClick={() => setSelected(weather.locationId)}><span>{weatherSymbol(weather.condition)}</span><div><small>{weather.locationName}</small><b>{weather.temperature.toFixed(1)}°C</b><p>{weather.condition}</p></div><em>{weather.sources.filter((source) => source.available).length}/3 fontes</em></button>)}</section>
   </>;
 }
 
 function WeatherLocationSummary({ weather, checking, checkedAt, onRefresh }: { weather?: LocationWeather; checking: boolean; checkedAt: string; onRefresh: () => void }) {
-  return <section className="map-weather-panel"><header><div><small>CONDIÇÃO CLIMÁTICA</small><b>{weather ? `${weather.temperature.toFixed(1)}°C · ${weather.condition}` : 'Dados não consultados'}</b></div><button type="button" onClick={onRefresh} disabled={checking}>{checking ? '…' : '↻'}</button></header>{weather && <div>{weather.sources.map((source) => <span key={source.id}><b>{source.name}</b><small>{source.available ? `${source.temperature.toFixed(1)}°C · ${source.condition}` : 'Indisponível'}</small></span>)}</div>}{checkedAt && <small>Atualizado em {new Date(checkedAt).toLocaleString('pt-BR')}</small>}</section>;
+  return <section className="map-weather-panel"><header><div><small>CONDIÇÃO CLIMÁTICA</small><b>{weather ? `${weather.temperature.toFixed(1)}°C · ${weather.condition}` : 'Dados não consultados'}</b></div><button type="button" onClick={onRefresh} disabled={checking}>{checking ? '…' : '↻'}</button></header>{weather && <><div className="map-weather-sources">{weather.sources.map((source) => <span key={source.id}><b>{source.name}</b><small>{source.available ? `${source.temperature.toFixed(1)}°C · ${source.condition}` : 'Indisponível'}</small></span>)}</div>{weather.sowingDate ? <div className="map-weather-history"><span><b>{(weather.accumulatedPrecipitation ?? 0).toFixed(1)} mm</b><small>acumulados desde {formatDate(weather.sowingDate)}</small></span><span><b>{(weather.events ?? []).length}</b><small>alerta(s) de tempestade/granizo</small></span></div> : <p className="map-weather-waiting">Histórico aguardando registro operacional de semeadura.</p>}<WeatherWeekCalendar weather={weather} compact /></>}{checkedAt && <small>Atualizado em {new Date(checkedAt).toLocaleString('pt-BR')}</small>}</section>;
 }
 
 function MapScreen({ harvestId, trialList, activities, schedule, weatherConditions, weatherChecking, weatherCheckedAt, onRefreshWeather, onLocation }: { harvestId: string; trialList: Trial[]; activities: Activity[]; schedule: PlannedActivity[]; weatherConditions: LocationWeather[]; weatherChecking: boolean; weatherCheckedAt: string; onRefreshWeather: () => void; onLocation: (locationId: string) => void }) {
@@ -1012,7 +1042,7 @@ function TrialsScreen({ trialList, activities, schedule, context, onClearContext
     {(context.locationId || context.operational) && <div className="active-context"><span>Filtro aplicado:</span><b>{context.locationId ? locations.find((location) => location.id === context.locationId)?.name : context.operational === 'late' ? 'Campos em atraso' : 'Campos em dia'}</b><button onClick={() => { setLocationFilter('Todos'); onClearContext(); }}>× Limpar</button></div>}
     <section className="toolbar"><label className="filter-search">⌕<input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Buscar ensaio ou campo" /></label><label className="filter-select">Nome do ensaio<select value={trialNameFilter} onChange={(event) => setTrialNameFilter(event.target.value)}><option>Todos</option>{[...new Set(trialList.map((trial) => trial.name))].sort().map((name) => <option key={name}>{name}</option>)}</select></label><label className="filter-select">Localidade<select value={locationFilter} onChange={(event) => setLocationFilter(event.target.value)}><option>Todos</option>{locations.map((location) => <option value={location.id} key={location.id}>{location.name}</option>)}</select></label><label className="filter-select">Qualidade<select value={qualityFilter} onChange={(event) => setQualityFilter(event.target.value)}><option>Todas</option><option>Excelente</option><option>Adequado</option><option>Atenção</option><option>Crítico</option></select></label></section>
     <section className="quality-scale"><span><i className="excellent" />Excelente</span><span><i className="adequate" />Adequado</span><span><i className="attention" />Atenção</span><span><i className="critical" />Crítico</span><small>A cor representa qualidade, não situação operacional.</small></section>
-    <section className="trial-grid">{filtered.map((trial) => { const quality = trialQuality(trial, activities); return <button className={`trial-card quality-card ${quality.tone}`} key={trial.id} onClick={() => onTrial(trial)}><div className="trial-card-top"><span>{trial.areaCategory ?? trial.type}</span><QualityBadge trial={trial} activities={activities} /></div><h2>{trial.name}</h2><p>◎ {trial.place} · RS{trial.fieldName ? ` · ${trial.fieldName}` : ''}</p>{quality.alerts.length > 0 && <div className="trial-alert-preview"><b>! {quality.alerts.length} alerta(s) · −{quality.penalty}%</b><small>{quality.alerts.slice(0,2).map((alert) => `${alert.alertCategory}${alert.plotIds?.length ? ` · PlotID ${alert.plotIds.join(', ')}` : ''}`).join(' | ')}</small></div>}<div className="trial-stats"><span><b>{trial.plots.toLocaleString('pt-BR')}</b> parcelas</span><span><b>{phenologicalStage(trial)}</b> estádio</span></div>{Boolean(trial.issueCount) && <div className="trial-issue-summary"><b>{trial.issueCount} alerta(s) de implantação</b>{Boolean(trial.lostPlots?.length) && <small>Parcelas perdidas: {trial.lostPlots?.join(', ')}</small>}{Boolean(trial.layoutPenalty) && <small>Impacto na qualidade: -{trial.layoutPenalty} pontos</small>}</div>}<div className="progress quality-progress"><i style={{ width: `${quality.score}%` }} /></div><div className="next-action"><small>PRÓXIMA AÇÃO · {formatDate(trial.nextDate)}</small><b>{trial.next}</b></div></button>; })}</section>
+    <section className="trial-grid">{filtered.map((trial) => { const quality = trialQuality(trial, activities); const sowingDate = actualSowingDate(trial, activities, schedule); return <button className={`trial-card quality-card ${quality.tone}`} key={trial.id} onClick={() => onTrial(trial)}><div className="trial-card-top"><span>{trial.areaCategory ?? trial.type}</span><QualityBadge trial={trial} activities={activities} /></div><h2>{trial.name}</h2><p>◎ {trial.place} · RS{trial.fieldName ? ` · ${trial.fieldName}` : ''}</p>{quality.alerts.length > 0 && <div className="trial-alert-preview"><b>! {quality.alerts.length} alerta(s) · −{quality.penalty}%</b><small>{quality.alerts.slice(0,2).map((alert) => `${alert.alertCategory}${alert.plotIds?.length ? ` · PlotID ${alert.plotIds.join(', ')}` : ''}`).join(' | ')}</small></div>}<div className="trial-stats"><span><b>{trial.plots.toLocaleString('pt-BR')}</b> parcelas</span><span><b>{sowingDate ? phenologicalStage(trial, sowingDate) : 'Não semeado'}</b> estádio</span></div>{Boolean(trial.issueCount) && <div className="trial-issue-summary"><b>{trial.issueCount} alerta(s) de implantação</b>{Boolean(trial.lostPlots?.length) && <small>Parcelas perdidas: {trial.lostPlots?.join(', ')}</small>}{Boolean(trial.layoutPenalty) && <small>Impacto na qualidade: -{trial.layoutPenalty} pontos</small>}</div>}<div className="progress quality-progress"><i style={{ width: `${quality.score}%` }} /></div><div className="next-action"><small>PRÓXIMA AÇÃO · {formatDate(trial.nextDate)}</small><b>{trial.next}</b></div></button>; })}</section>
     {filtered.length === 0 && <section className="card no-results"><span>◇</span><h2>Nenhum ensaio neste recorte</h2><p>Limpe um dos filtros para ampliar a visualização.</p></section>}
   </>;
 }
