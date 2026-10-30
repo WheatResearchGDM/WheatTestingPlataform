@@ -1,7 +1,7 @@
 'use client';
 
 import dynamic from 'next/dynamic';
-import { FormEvent, useEffect, useMemo, useState } from 'react';
+import { FormEvent, createContext, useContext, useEffect, useMemo, useState } from 'react';
 import type { NetworkLocation } from '../components/NetworkMap';
 import type { LayoutFinalization } from '../components/FieldLayoutMap';
 import { fetchWeatherConditions, type LocationWeather } from '../lib/weatherAlerts';
@@ -19,7 +19,7 @@ import {
 const NetworkMap = dynamic(() => import('../components/NetworkMap'), { ssr: false });
 const FieldLayoutMap = dynamic(() => import('../components/FieldLayoutMap'), { ssr: false });
 
-type Screen = 'dashboard' | 'mapa' | 'clima' | 'ensaios' | 'planejamento' | 'rotas' | 'operacional' | 'campo' | 'atividade' | 'historico' | 'resultados' | 'usuarios' | 'cadastros' | 'detalhe';
+type Screen = 'dashboard' | 'mapa' | 'clima' | 'ensaios' | 'planejamento' | 'rotas' | 'operacional' | 'campo' | 'atividade' | 'historico' | 'usuarios' | 'cadastros' | 'detalhe';
 type ActivityStream = 'operational' | 'field';
 type MacroGroup = 'Ensaios' | 'Coleção' | 'Founder' | 'PD' | 'Multiqualidades' | 'Outro';
 type MacroStage = 'Semeadura' | 'Condução' | 'Colheita';
@@ -69,8 +69,8 @@ const initialActivities: Activity[] = baseActivities.map((activity) => ({ ...act
 const blankTrial: Trial = { id: '', name: '', type: '', year: 2026, cycle: 'Safra 2026', locationId: '', plots: 0, sowing: sourceSummary.importedAt, harvest: sourceSummary.importedAt, owner: '', rawStatus: 'Planejado', priority: 'Normal', notes: '', place: '', city: '', status: 'Planejado', progress: 0, next: '', nextDate: sourceSummary.importedAt, date: '' };
 const currentUser = importedUsers[0];
 const roleScreens: Record<AppRole, Screen[]> = {
-  Administrador: ['dashboard','mapa','rotas','clima','ensaios','planejamento','operacional','campo','atividade','historico','resultados','usuarios','cadastros','detalhe'],
-  Gestor: ['dashboard','mapa','rotas','clima','ensaios','planejamento','operacional','campo','atividade','historico','resultados','cadastros','detalhe'],
+  Administrador: ['dashboard','mapa','rotas','clima','ensaios','planejamento','operacional','campo','atividade','historico','usuarios','cadastros','detalhe'],
+  Gestor: ['dashboard','mapa','rotas','clima','ensaios','planejamento','operacional','campo','atividade','historico','cadastros','detalhe'],
   RA: ['dashboard','mapa','rotas','clima','ensaios','planejamento','operacional','campo','atividade','historico','cadastros','detalhe'],
   'Técnico responsável': ['dashboard','mapa','rotas','clima','ensaios','operacional','campo','atividade','historico','detalhe'],
 };
@@ -221,12 +221,13 @@ const navItems: { screen: Screen; icon: string; label: string }[] = [
   { screen: 'operacional', icon: '⚒', label: 'Registro operacional' },
   { screen: 'campo', icon: '✓', label: 'Registro de campo' },
   { screen: 'historico', icon: '↺', label: 'Histórico' },
-  { screen: 'resultados', icon: '▥', label: 'Resultados' },
+
   { screen: 'cadastros', icon: '⚙', label: 'Gerenciamento' },
   { screen: 'usuarios', icon: '♙', label: 'Usuários' },
 ];
 
 function Status({ kind, children }: { kind: 'ok' | 'attention' | 'late'; children: React.ReactNode }) {
+  const locations = useContext(ProgramLocations) ?? baseLocations;
   return <span className={`status-pill ${kind}`}><i />{children}</span>;
 }
 
@@ -266,7 +267,14 @@ async function readSpreadsheet(file: File, dataset: string) {
   return headers.includes('local_codigo') ? rows.filter((row) => String(row.local_codigo ?? '').trim()) : rows;
 }
 
+const ProgramLocations = createContext<NetworkLocation[] | null>(null);
+const programs = [
+  { id: 'RHA_1', name: 'RHA I', program: 'Programa U' },
+  { id: 'RHA_2', name: 'RHA II', program: 'Programa K' },
+  { id: 'RHA_3', name: 'RHA III', program: 'Programa X' },
+];
 export default function Home() {
+  const [programId, setProgramId] = useState('Brasil');
   const [phase, setPhase] = useState<'login' | 'profile' | 'app'>('login');
   const [currentRole, setCurrentRole] = useState<AppRole>(() => typeof window === 'undefined' ? 'Administrador' : (localStorage.getItem('field-wheat-current-role-v1') as AppRole) || 'Administrador');
   const [screen, setScreen] = useState<Screen>('dashboard');
@@ -445,7 +453,15 @@ export default function Home() {
     const next = harvests.map((harvest) => harvest.id === harvestId ? { ...harvest, status, quality: harvest.id === activeHarvestId ? qualityAverage(activities) : harvest.quality, updatedAt: new Date().toISOString() } : harvest); setHarvests(next); localStorage.setItem('field-wheat-harvests-v2', JSON.stringify(next)); persistHarvestSnapshot(); setToast(status === 'Encerrada' ? 'Safra encerrada e bloqueada para novos registros.' : 'Safra reaberta pelo administrador.'); setTimeout(() => setToast(''), 3500);
   }
 
-  const go = (next: Screen) => { setScreen(next); setMenuOpen(false); window.scrollTo({ top: 0, behavior: 'smooth' }); };
+  const scopedLocations = locations.filter((location) => programId === 'Brasil' || rhaCode(location.rha || location.region) === programId);
+  const scopedLocationIds = new Set(scopedLocations.map((location) => location.id));
+  const scopedTrials = allTrials.filter((trial) => scopedLocationIds.has(trial.locationId));
+  const scopedTrialIds = new Set(scopedTrials.map((trial) => trial.id));
+  const scopedSchedule = schedule.filter((item) => item.locationId ? scopedLocationIds.has(item.locationId) : scopedTrialIds.has(item.trialId));
+  const scopedActivities = activities.filter((item) => item.locationId ? scopedLocationIds.has(item.locationId) : scopedTrialIds.has(item.trial));
+  const activeProgram = programs.find((program) => program.id === programId);
+  const selectProgram = (id: string) => { setProgramId(id); setScreen('dashboard'); setSelectedPlan(null); setViewContext({}); setSelectedTrial(allTrials.find((trial) => locations.some((location) => location.id === trial.locationId && rhaCode(location.rha || location.region) === id)) ?? blankTrial); };
+  const go = (next: Screen) => { if (programId === 'Brasil' && !['dashboard','usuarios'].includes(next)) { setToast('Abra um programa para acessar o acompanhamento operacional.'); return; } setScreen(next); setMenuOpen(false); window.scrollTo({ top: 0, behavior: 'smooth' }); };
   function openFiltered(context: ViewContext) {
     setViewContext(context);
     go('ensaios');
@@ -466,6 +482,7 @@ export default function Home() {
       : baseQuality;
     const plannedId = String(data.get('plannedId') || '');
     const locationId = String(data.get('locationId') || selectedTrial.locationId);
+    if (programId === 'Brasil' || !scopedLocationIds.has(locationId)) { setToast('Selecione um local do programa ativo para registrar a atividade.'); return; }
     const activePlan = schedule.find((item) => item.id === plannedId);
     const areaCategory = String(data.get('areaCategory') || activePlan?.areaCategory || 'Ensaios');
     const macroGroup = String(data.get('macroGroup') || data.get('baseMacroGroup') || groupFromCategory(areaCategory)) as MacroGroup;
@@ -652,7 +669,7 @@ export default function Home() {
   function finalizeLayoutPlanning(payload: LayoutFinalization) {
     if (activeHarvest?.status === 'Encerrada') { setToast('Safra encerrada. Reabra-a antes de finalizar uma implantação.'); return; }
     const locationCity = /\s-\s[A-Z]{2}$/.test(payload.location.city) ? payload.location.city : `${payload.location.city} - RS`;
-    const nextLocation: NetworkLocation = { id: payload.location.id, name: payload.location.name, city: locationCity, region: rhaCode(payload.location.rha || payload.location.region), rha: rhaCode(payload.location.rha || payload.location.region), lat: payload.location.lat, lng: payload.location.lng, trials: payload.allocations.length, plots: payload.allocations.reduce((sum, allocation) => sum + allocation.plotCount, 0), status: 'ok' };
+    const nextLocation: NetworkLocation = { id: payload.location.id, name: payload.location.name, city: locationCity, region: programId === 'Brasil' ? rhaCode(payload.location.rha || payload.location.region) : programId, rha: programId === 'Brasil' ? rhaCode(payload.location.rha || payload.location.region) : programId, lat: payload.location.lat, lng: payload.location.lng, trials: payload.allocations.length, plots: payload.allocations.reduce((sum, allocation) => sum + allocation.plotCount, 0), status: 'ok' };
     const areaText = payload.areaType.toLowerCase();
     const group: MacroGroup = areaText.includes('cole') ? 'Coleção' : areaText.includes('founder') ? 'Founder' : /^pd/.test(areaText) ? 'PD' : areaText.includes('multi') ? 'Multiqualidades' : areaText.includes('outro') ? 'Outro' : 'Ensaios';
     const year = Number(payload.plannedSowingDate.slice(0, 4)) || new Date().getFullYear();
@@ -685,7 +702,7 @@ export default function Home() {
 
   function addManagedLocation(input: { code: string; name: string; city: string; uf: string; region: string; lat: number; lng: number }) {
     if (activeHarvest?.status === 'Encerrada') { setToast('Safra encerrada. Reabra-a para editar cadastros.'); return; }
-    const nextLocation: NetworkLocation = { id: input.code.trim().toUpperCase(), name: input.name.trim(), city: `${input.city.trim()} - ${input.uf.trim().toUpperCase()}`, region: rhaCode(input.region), rha: rhaCode(input.region), lat: input.lat || -29.63, lng: input.lng || -53.05, trials: 0, plots: 0, status: 'ok' };
+    const nextLocation: NetworkLocation = { id: input.code.trim().toUpperCase(), name: input.name.trim(), city: `${input.city.trim()} - ${input.uf.trim().toUpperCase()}`, region: (programId === 'Brasil' ? rhaCode(input.region) : programId), rha: (programId === 'Brasil' ? rhaCode(input.region) : programId), lat: input.lat || -29.63, lng: input.lng || -53.05, trials: 0, plots: 0, status: 'ok' };
     const nextLocations = [...locations.filter((item) => item.id !== nextLocation.id), nextLocation]; locations.splice(0, locations.length, ...nextLocations); localStorage.setItem('field-wheat-locations-clean-v1', JSON.stringify(nextLocations));
     const source = JSON.parse(localStorage.getItem('field-wheat-unified-source-v1') ?? '[]') as Record<string, unknown>[]; const nextSource = [...source.filter((row) => String(row.local_codigo) !== nextLocation.id || row.ensaio_codigo), { safra: activeHarvest?.name, local_codigo: nextLocation.id, local_nome: nextLocation.name, municipio: input.city, uf: input.uf.toUpperCase(), latitude: nextLocation.lat, longitude: nextLocation.lng, rha_regiao: rhaLabel(nextLocation.rha), tipo_registro: 'Localidade' }]; localStorage.setItem('field-wheat-unified-source-v1', JSON.stringify(nextSource));
     const updatedAt = persistHarvestSnapshot({ locations: nextLocations, source: nextSource }); touchHarvest(updatedAt); setDataVersion((value) => value + 1); setToast(`${nextLocation.name} adicionada à ${activeHarvest?.name}.`); setTimeout(() => setToast(''), 3500);
@@ -856,7 +873,7 @@ export default function Home() {
       <aside className={menuOpen ? 'sidebar nav-rail open' : 'sidebar nav-rail'} aria-label="Menu principal">
         <Brand light compact />
         <nav aria-label="Navegação principal">
-          {navItems.filter((item) => roleScreens[currentRole].includes(item.screen)).map((item) => <button title={item.label} key={item.screen} className={screen === item.screen ? 'active' : ''} onClick={() => go(item.screen)}><span className="nav-icon"><NavIcon screen={item.screen} /></span><span className="nav-label">{item.label}</span></button>)}
+          {navItems.filter((item) => roleScreens[currentRole].includes(item.screen) && (programId !== 'Brasil' || ['dashboard','usuarios'].includes(item.screen))).map((item) => <button title={item.label} key={item.screen} className={screen === item.screen ? 'active' : ''} onClick={() => go(item.screen)}><span className="nav-icon"><NavIcon screen={item.screen} /></span><span className="nav-label">{item.label}</span></button>)}
         </nav>
         <div className="sidebar-help"><span>?</span><div><b>Precisa de ajuda?</b><small>Suporte da plataforma</small></div></div>
       </aside>
@@ -872,19 +889,26 @@ export default function Home() {
         </header>
 
         <main className="content">
-          {screen === 'dashboard' && <Dashboard trialList={allTrials} activities={activities} schedule={schedule} harvests={harvests} activeHarvestId={activeHarvestId} onHarvest={switchHarvest} onNavigate={go} onFilter={openFiltered} onTrial={(trial) => { setSelectedTrial(trial); go('detalhe'); }} />}
-          {screen === 'mapa' && <MapScreen harvestId={activeHarvestId} trialList={allTrials} activities={activities} schedule={schedule} weatherConditions={weatherConditions} weatherChecking={weatherChecking} weatherCheckedAt={weatherCheckedAt} onRefreshWeather={refreshWeatherConditions} onLocation={(locationId) => openFiltered({ locationId })} />}
-          {screen === 'clima' && <WeatherScreen weatherConditions={weatherConditions} weatherChecking={weatherChecking} weatherCheckedAt={weatherCheckedAt} onRefresh={refreshWeatherConditions} />}
-          {screen === 'ensaios' && <TrialsScreen trialList={allTrials} activities={activities} schedule={schedule} context={viewContext} onClearContext={() => setViewContext({})} onNew={() => go('cadastros')} onTrial={(trial) => { setSelectedTrial(trial); go('detalhe'); }} />}
-          {screen === 'planejamento' && <PlanningScreen trialList={allTrials} schedule={schedule} weatherConditions={weatherConditions} onActivity={openPlannedActivity} onReprogram={reprogramTrial} />}
-          {screen === 'rotas' && <><PageHead eyebrow="Logística de campo" title="Rotas" copy="Organize os locais da semana ou monte uma visita avulsa." /><RoutePlanner locations={locations} trials={allTrials} schedule={schedule} weather={weatherConditions} /></>}
-          {screen === 'operacional' && <PhenologyActivityForm mode="operational" dynamicFields={activityFields} trialList={allTrials} activities={activities} schedule={schedule} onSave={saveActivity} defaultTrial={selectedTrial.id} selectedPlan={selectedPlan} />}
-          {(screen === 'campo' || screen === 'atividade') && <PhenologyActivityForm mode="field" dynamicFields={activityFields} trialList={allTrials} activities={activities} schedule={schedule} onSave={saveActivity} defaultTrial={selectedTrial.id} selectedPlan={selectedPlan} />}
-          {screen === 'historico' && <HistoryScreen activities={activities} onNew={() => go('campo')} />}
-          {screen === 'resultados' && <ResultsScreen trialList={allTrials} activities={activities} schedule={schedule} />}
-          {screen === 'cadastros' && <AdminRegistrationScreen registeredTrials={registeredTrials} trialList={allTrials} activities={activities} schedule={schedule} harvests={harvests} activeHarvestId={activeHarvestId} lastUpdated={lastUpdated} dynamicFields={activityFields} onDynamicFields={updateActivityFields} activityTemplates={activityTemplates} onActivityTemplates={updateActivityTemplates} onSave={saveFieldTrial} onImportDataset={importOperationalDataset} onImportUnified={importUnifiedPlanning} onCreatePlanning={createPlanningFromWizard} onAddLocation={addManagedLocation} onAddTrials={addManagedTrials} onCreateHarvest={createHarvest} onHarvestStatus={setHarvestStatus} onHarvest={switchHarvest} onFinalizeLayout={finalizeLayoutPlanning} onDeleteTrial={deleteManagedTrial} onDeleteLocation={deleteManagedLocation} onReportImplementation={reportImplementationIssue} />}
+          <section className="program-hierarchy" aria-label="Pastas de programas">
+            <button className={programId === 'Brasil' ? 'active' : ''} onClick={() => selectProgram('Brasil')}>▣ Brasil<small>Síntese nacional</small></button>
+            <div>{programs.map((program) => <button key={program.id} className={programId === program.id ? 'active' : ''} onClick={() => selectProgram(program.id)}><span>▱ {program.name}</span><b>{program.program}</b><small>{locations.filter((location) => rhaCode(location.rha || location.region) === program.id).length} locais · {allTrials.filter((trial) => locations.some((location) => location.id === trial.locationId && rhaCode(location.rha || location.region) === program.id)).length} ensaios</small></button>)}</div>
+          </section>
+          <div className="program-breadcrumb">Brasil{activeProgram ? ` / ${activeProgram.name} / ${activeProgram.program}` : ' / Síntese nacional'}</div>
+          <ProgramLocations.Provider value={scopedLocations}><div key={programId} className={programId === 'Brasil' ? 'national-summary' : 'program-workspace'}>
+          {screen === 'dashboard' && <><Dashboard trialList={scopedTrials} activities={scopedActivities} schedule={scopedSchedule} harvests={harvests} activeHarvestId={activeHarvestId} onHarvest={switchHarvest} onNavigate={go} onFilter={openFiltered} onTrial={(trial) => { setSelectedTrial(trial); go('detalhe'); }} /><ResultsSummary trialList={scopedTrials} activities={scopedActivities} schedule={scopedSchedule} /></>}
+          {screen === 'mapa' && <MapScreen harvestId={activeHarvestId} trialList={scopedTrials} activities={scopedActivities} schedule={scopedSchedule} weatherConditions={weatherConditions.filter((item) => scopedLocationIds.has(item.locationId))} weatherChecking={weatherChecking} weatherCheckedAt={weatherCheckedAt} onRefreshWeather={refreshWeatherConditions} onLocation={(locationId) => openFiltered({ locationId })} />}
+          {screen === 'clima' && <WeatherScreen weatherConditions={weatherConditions.filter((item) => scopedLocationIds.has(item.locationId))} weatherChecking={weatherChecking} weatherCheckedAt={weatherCheckedAt} onRefresh={refreshWeatherConditions} />}
+          {screen === 'ensaios' && <TrialsScreen trialList={scopedTrials} activities={scopedActivities} schedule={scopedSchedule} context={viewContext} onClearContext={() => setViewContext({})} onNew={() => go('cadastros')} onTrial={(trial) => { setSelectedTrial(trial); go('detalhe'); }} />}
+          {screen === 'planejamento' && <PlanningScreen trialList={scopedTrials} schedule={scopedSchedule} weatherConditions={weatherConditions.filter((item) => scopedLocationIds.has(item.locationId))} onActivity={openPlannedActivity} onReprogram={reprogramTrial} />}
+          {screen === 'rotas' && <><PageHead eyebrow="Logística de campo" title="Rotas" copy="Organize os locais da semana ou monte uma visita avulsa." /><RoutePlanner locations={scopedLocations} trials={scopedTrials} schedule={scopedSchedule} weather={weatherConditions.filter((item) => scopedLocationIds.has(item.locationId))} /></>}
+          {screen === 'operacional' && <PhenologyActivityForm mode="operational" dynamicFields={activityFields} trialList={scopedTrials} activities={scopedActivities} schedule={scopedSchedule} onSave={saveActivity} defaultTrial={selectedTrial.id} selectedPlan={selectedPlan} />}
+          {(screen === 'campo' || screen === 'atividade') && <PhenologyActivityForm mode="field" dynamicFields={activityFields} trialList={scopedTrials} activities={scopedActivities} schedule={scopedSchedule} onSave={saveActivity} defaultTrial={selectedTrial.id} selectedPlan={selectedPlan} />}
+          {screen === 'historico' && <HistoryScreen activities={scopedActivities} onNew={() => go('campo')} />}
+
+          {screen === 'cadastros' && <AdminRegistrationScreen registeredTrials={registeredTrials} trialList={scopedTrials} activities={scopedActivities} schedule={scopedSchedule} harvests={harvests} activeHarvestId={activeHarvestId} lastUpdated={lastUpdated} dynamicFields={activityFields} onDynamicFields={updateActivityFields} activityTemplates={activityTemplates} onActivityTemplates={updateActivityTemplates} onSave={saveFieldTrial} onImportDataset={importOperationalDataset} onImportUnified={importUnifiedPlanning} onCreatePlanning={createPlanningFromWizard} onAddLocation={addManagedLocation} onAddTrials={addManagedTrials} onCreateHarvest={createHarvest} onHarvestStatus={setHarvestStatus} onHarvest={switchHarvest} onFinalizeLayout={finalizeLayoutPlanning} onDeleteTrial={deleteManagedTrial} onDeleteLocation={deleteManagedLocation} onReportImplementation={reportImplementationIssue} />}
           {screen === 'usuarios' && <UsersScreen />}
-          {screen === 'detalhe' && <TrialDetail trial={selectedTrial} activities={activities} schedule={schedule} onBack={() => go('ensaios')} onActivity={() => { setSelectedPlan(null); go('campo'); }} onPlannedActivity={openPlannedActivity} />}
+          {screen === 'detalhe' && <TrialDetail trial={selectedTrial} activities={scopedActivities} schedule={scopedSchedule} onBack={() => go('ensaios')} onActivity={() => { setSelectedPlan(null); go('campo'); }} onPlannedActivity={openPlannedActivity} />}
+          </div></ProgramLocations.Provider>
         </main>
       </div>
       {toast && <div className="toast">✓ {toast}</div>}
@@ -909,7 +933,7 @@ function NavIcon({ screen }: { screen: Screen }) {
     campo: <><path d="M9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></>,
     atividade: <><path d="M9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></>,
     historico: <><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5M12 7v5l3 2"/></>,
-    resultados: <><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></>,
+
     cadastros: <><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H3v-4h.1a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1A1.7 1.7 0 0 0 9 4a1.7 1.7 0 0 0 1-1.6V2h4v.3A1.7 1.7 0 0 0 15 4a1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4H21a1.7 1.7 0 0 0-1.6 1Z"/></>,
     usuarios: <><circle cx="9" cy="8" r="4"/><path d="M2 21a7 7 0 0 1 14 0M16 3.5a4 4 0 0 1 0 8M18 14a6 6 0 0 1 4 7"/></>,
     detalhe: <><circle cx="12" cy="12" r="9"/><path d="M12 8h.01M11 12h1v4h1"/></>,
@@ -922,6 +946,7 @@ function PageHead({ eyebrow, title, copy, action }: { eyebrow: string; title: st
 }
 
 function Dashboard({ trialList, activities, schedule, harvests, activeHarvestId, onHarvest, onNavigate, onFilter, onTrial }: { trialList: Trial[]; activities: Activity[]; schedule: PlannedActivity[]; harvests: Harvest[]; activeHarvestId: string; onHarvest: (id: string) => void; onNavigate: (s: Screen) => void; onFilter: (context: ViewContext) => void; onTrial: (trial: Trial) => void }) {
+  const locations = useContext(ProgramLocations) ?? baseLocations;
   const [alertsOpen, setAlertsOpen] = useState(false);
   const criticalFieldAlerts: { id: string; locationId: string; type: string; detail: string; time: string; level: string }[] = [];
   const localityStages = locations.map((location) => ({ location, ...localityOverview(location.id, trialList, activities, schedule) })).filter((item) => item.localTrials.length > 0);
@@ -965,10 +990,10 @@ function Dashboard({ trialList, activities, schedule, harvests, activeHarvestId,
   const doneLate = recentActivities.filter((activity) => doneState(activity) === 'late').length;
   return <>
     <div className="dashboard-overview">
-    <PageHead eyebrow={`${harvests.find((item) => item.id === activeHarvestId)?.name ?? 'Safra'} · visão operacional`} title="Visão geral operacional" copy="Implantação, qualidade e atividades de campo consolidadas por região e localidade." action={<div className="harvest-switch"><label>Safra<select value={activeHarvestId} onChange={(event) => onHarvest(event.target.value)}>{harvests.map((harvest) => <option key={harvest.id} value={harvest.id}>{harvest.name}{harvest.status === 'Encerrada' ? ' · encerrada' : ''}</option>)}</select></label><div className="dashboard-register-actions"><button className="secondary-button" onClick={() => onNavigate('operacional')}>⚒ Registro operacional</button><button className="primary-button" onClick={() => onNavigate('campo')}>✓ Registro de campo</button></div></div>} />
+    <PageHead eyebrow={`${harvests.find((item) => item.id === activeHarvestId)?.name ?? 'Safra'} · visão operacional`} title="Visão geral" copy="Implantação, qualidade e atividades de campo consolidadas por região e localidade." action={<div className="harvest-switch"><label>Safra<select value={activeHarvestId} onChange={(event) => onHarvest(event.target.value)}>{harvests.map((harvest) => <option key={harvest.id} value={harvest.id}>{harvest.name}{harvest.status === 'Encerrada' ? ' · encerrada' : ''}</option>)}</select></label><div className="dashboard-register-actions"><button className="secondary-button" onClick={() => onNavigate('operacional')}>⚒ Registro operacional</button><button className="primary-button" onClick={() => onNavigate('campo')}>✓ Registro de campo</button></div></div>} />
     <section className="dashboard-analytics">
       <button className="dashboard-chart-card seeded-chart" onClick={() => onFilter({})}><div className="dashboard-donut" style={{ background: `conic-gradient(#2f7450 0 ${plantedPercent}%,#e4e9e2 ${plantedPercent}% 100%)` }}><span><b>{plantedPercent}%</b><small>semeados</small></span></div><div><small>IMPLANTAÇÃO DA REDE</small><h2>{totalPlanted} de {trialList.length}</h2><p>ensaios já semeados</p></div><i>↗</i></button>
-      <article className="dashboard-chart-card vcu-chart"><div className="chart-card-head"><div><small>QUALIDADE MÉDIA</small><h2>RHA I e RHA II</h2></div><span>0–100</span></div><div className="vcu-bars"><label><span><b>RHA I</b><em>{rha1Quality}</em></span><i><u style={{ width: `${rha1Quality}%` }} /></i></label><label><span><b>RHA II</b><em>{rha2Quality}</em></span><i><u style={{ width: `${rha2Quality}%` }} /></i></label></div></article>
+      <article className="dashboard-chart-card vcu-chart"><div className="chart-card-head"><div><small>QUALIDADE MÉDIA</small><h2>Programas por RHA</h2></div><span>0–100</span></div><div className="vcu-bars">{programs.filter((program) => locations.some((location) => rhaCode(location.rha || location.region) === program.id)).map((program) => <label key={program.id}><span><b>{program.name} · {program.program}</b><em>{qualityByRegion(program.id)}</em></span><i><u style={{ width: `${qualityByRegion(program.id)}%` }} /></i></label>)}</div></article>
       <button className="dashboard-chart-card alert-chart" aria-expanded={alertsOpen} onClick={() => setAlertsOpen(!alertsOpen)}><span className={totalAlerts ? 'alert-orb active' : 'alert-orb'} aria-hidden="true">🔔</span><div><small>NOTIFICAÇÕES GRAVES</small><h2>{totalAlerts}</h2><p><b>{new Set(criticalFieldAlerts.map((alert) => alert.locationId)).size}</b> localidades exigem conferência imediata</p></div><i>{alertsOpen ? '↑' : '↓'}</i></button>
     </section>
     {alertsOpen && <section className="card critical-alert-center"><div className="card-head"><div><span className="eyebrow">CENTRAL DE OCORRÊNCIAS</span><h2>Problemas graves em campo</h2><p>Somente erros operacionais que exigem conferência aparecem neste painel.</p></div><button className="text-button" onClick={() => setAlertsOpen(false)}>Fechar ×</button></div><div className="critical-alert-list">{criticalFieldAlerts.map((alert) => { const location = locations.find((item) => item.id === alert.locationId); return <button key={alert.id} onClick={() => onFilter({ locationId: alert.locationId })}><span className="critical-alert-icon">!</span><span><small>{alert.level} · {alert.time}</small><b>{alert.type}</b><p>{alert.detail}</p></span><span className="critical-alert-location"><small>LOCALIDADE</small><b>◎ {location?.name}</b><em>Ver ensaios →</em></span></button>; })}</div></section>}
@@ -1014,6 +1039,7 @@ function WeatherWeekCalendar({ weather, compact = false }: { weather: LocationWe
 }
 
 function WeatherScreen({ weatherConditions, weatherChecking, weatherCheckedAt, onRefresh }: { weatherConditions: LocationWeather[]; weatherChecking: boolean; weatherCheckedAt: string; onRefresh: () => void }) {
+  const locations = useContext(ProgramLocations) ?? baseLocations;
   const [historyLimit, setHistoryLimit] = useState(10);
   const [selected, setSelected] = useState(locations[0]?.id ?? '');
   const current = weatherConditions.find((weather) => weather.locationId === selected) ?? weatherConditions[0];
@@ -1030,6 +1056,7 @@ function WeatherLocationSummary({ weather, checking, checkedAt, onRefresh }: { w
 }
 
 function MapScreen({ harvestId, trialList, activities, schedule, weatherConditions, weatherChecking, weatherCheckedAt, onRefreshWeather, onLocation }: { harvestId: string; trialList: Trial[]; activities: Activity[]; schedule: PlannedActivity[]; weatherConditions: LocationWeather[]; weatherChecking: boolean; weatherCheckedAt: string; onRefreshWeather: () => void; onLocation: (locationId: string) => void }) {
+  const locations = useContext(ProgramLocations) ?? baseLocations;
   const [selected, setSelected] = useState(locations[0]?.id ?? '');
   const [layoutOpen, setLayoutOpen] = useState(false);
   const current = locations.find((location) => location.id === selected) ?? locations[0];
@@ -1054,6 +1081,7 @@ function NewAreaDialog({ harvestName, onClose, onSubmit }: { harvestName: string
 }
 
 function TrialsScreen({ trialList, activities, schedule, context, onClearContext, onTrial, onNew }: { trialList: Trial[]; activities: Activity[]; schedule: PlannedActivity[]; context: ViewContext; onClearContext: () => void; onTrial: (trial: Trial) => void; onNew: () => void }) {
+  const locations = useContext(ProgramLocations) ?? baseLocations;
   const [query, setQuery] = useState('');
   const [locationFilter, setLocationFilter] = useState(context.locationId ?? 'Todos');
   const [qualityFilter, setQualityFilter] = useState('Todas');
@@ -1078,6 +1106,7 @@ function TrialsScreen({ trialList, activities, schedule, context, onClearContext
 }
 
 function PlanningScreen({ trialList, schedule, weatherConditions, onActivity, onReprogram }: { trialList: Trial[]; schedule: PlannedActivity[]; weatherConditions: LocationWeather[]; onActivity: (item: PlannedActivity) => void; onReprogram: (trialId: string, date: string) => void }) {
+  const locations = useContext(ProgramLocations) ?? baseLocations;
   const [month, setMonth] = useState(8);
   const [trialFilter, setTrialFilter] = useState('Todas');
   const [reprogramTrial, setReprogramTrial] = useState<string>(trialList[0]?.id ?? '');
@@ -1104,6 +1133,7 @@ function PlanningScreen({ trialList, schedule, weatherConditions, onActivity, on
 }
 
 function ActivityForm({ trialList, onSave, defaultTrial, selectedPlan }: { trialList: Trial[]; onSave: (event: FormEvent<HTMLFormElement>) => void; defaultTrial: string; selectedPlan: PlannedActivity | null }) {
+  const locations = useContext(ProgramLocations) ?? baseLocations;
   const defaultLocation = trialList.find((trial) => trial.id === (selectedPlan?.trialId ?? defaultTrial))?.locationId ?? locations[0].id;
   const [locationId, setLocationId] = useState(defaultLocation);
   const [scope, setScope] = useState<'Área total' | 'Grupo específico'>('Grupo específico');
@@ -1143,6 +1173,7 @@ function activityStreamFor(plan?: PlannedActivity | null): ActivityStream {
 }
 
 function PhenologyActivityForm({ trialList, activities, schedule, onSave, defaultTrial, selectedPlan, mode, dynamicFields }: { trialList: Trial[]; activities: Activity[]; schedule: PlannedActivity[]; onSave: (event: FormEvent<HTMLFormElement>) => void; defaultTrial: string; selectedPlan: PlannedActivity | null; mode: ActivityStream; dynamicFields: DynamicField[] }) {
+  const locations = useContext(ProgramLocations) ?? baseLocations;
   const defaultLocation = selectedPlan?.locationId ?? trialList.find((trial) => trial.id === (selectedPlan?.trialId ?? defaultTrial))?.locationId ?? locations[0]?.id ?? '';
   const [locationId, setLocationId] = useState(defaultLocation);
   const initialPlan = selectedPlan && activityStreamFor(selectedPlan) === mode ? selectedPlan : schedule.find((item) => item.status !== 'Concluído' && activityStreamFor(item) === mode && (item.locationId === defaultLocation || trialList.find((trial) => trial.id === item.trialId)?.locationId === defaultLocation)) ?? null;
@@ -1249,6 +1280,7 @@ function QualityRange({ name, label, value, positive = false, onChange }: { name
 }
 
 function HistoryScreen({ activities, onNew }: { activities: Activity[]; onNew: () => void }) {
+  const locations = useContext(ProgramLocations) ?? baseLocations;
   return <><PageHead eyebrow="Rastreabilidade" title="Histórico de manejo" copy="Todas as atividades registradas na rede, da mais recente para a mais antiga." action={<button className="primary-button" onClick={onNew}>＋ Nova atividade</button>} />
     <section className="toolbar"><button>Todos os ensaios⌄</button><button>Todos os tipos⌄</button><button>Últimos 30 dias⌄</button></section>
     <section className="card history-list">{activities.map((activity) => <article key={activity.id}><div className="timeline-dot" /><time>{activity.date}</time><div className="activity-icon">✓</div><div className="activity-copy"><span>{activity.macroStage ?? activity.type}</span><h2>{activity.notes}</h2><p><b>{activity.locationId ? locations.find((location) => location.id === activity.locationId)?.name : activity.trial}</b>{activity.scope ? ` · ${activity.scope}${activity.scope !== 'Área total' ? `: ${activity.macroGroup}` : ''}` : ''} · Registrado por {activity.owner}{activity.qualityScore !== undefined ? ` · Qualidade ${activity.qualityScore}/100 (${activity.qualityClass})` : ''}</p>{activity.checks && <small>{activity.checks.length} checks concluídos{activity.photos?.length ? ` · ${activity.photos.length} foto(s)` : ''}</small>}</div><button aria-label="Mais opções">•••</button></article>)}</section>
@@ -1256,6 +1288,7 @@ function HistoryScreen({ activities, onNew }: { activities: Activity[]; onNew: (
 }
 
 function AdminRegistrationScreen({ registeredTrials, trialList, activities, schedule, harvests, activeHarvestId, lastUpdated, dynamicFields, onDynamicFields, activityTemplates, onActivityTemplates, onSave, onImportDataset, onImportUnified, onCreatePlanning, onAddLocation, onAddTrials, onCreateHarvest, onHarvestStatus, onHarvest, onFinalizeLayout, onDeleteTrial, onDeleteLocation, onReportImplementation }: { registeredTrials: Trial[]; trialList: Trial[]; activities: Activity[]; schedule: PlannedActivity[]; harvests: Harvest[]; activeHarvestId: string; lastUpdated: string; dynamicFields: DynamicField[]; onDynamicFields: (fields: DynamicField[]) => void; activityTemplates: ActivityTemplate[]; onActivityTemplates: (templates: ActivityTemplate[]) => void; onSave: (event: FormEvent<HTMLFormElement>) => void; onImportDataset: (dataset: string, rows: Record<string, unknown>[]) => void; onImportUnified: (rows: Record<string, unknown>[]) => void; onCreatePlanning: (config: PlanningWizardConfig) => void; onAddLocation: (input: { code: string; name: string; city: string; uf: string; region: string; lat: number; lng: number }) => void; onAddTrials: (input: { locationIds: string[]; trialCode: string; trialName: string; group: MacroGroup; subtype: string; fieldCode: string; fieldName: string; plots: number; sowing: string; owner: string; priority: string }) => void; onCreateHarvest: (name: string, clone: boolean) => void; onHarvestStatus: (id: string, status: HarvestStatus) => void; onHarvest: (id: string) => void; onFinalizeLayout: (payload: LayoutFinalization) => void; onDeleteTrial: (id: string) => void; onDeleteLocation: (id: string) => void; onReportImplementation: (input: { locationId: string; trialId: string; plotIds: string[]; category: string; description: string }) => void }) {
+  const locations = useContext(ProgramLocations) ?? baseLocations;
   const [tab, setTab] = useState<'unified' | 'catalog' | 'fields' | 'templates' | 'harvests' | 'planner' | 'import' | 'records' | 'quality' | 'alerts' | 'implantation'>('unified');
   const [issueLocation, setIssueLocation] = useState(locations[0]?.id ?? '');
   const [issueTrial, setIssueTrial] = useState('');
@@ -1442,14 +1475,15 @@ function HarvestManagementPanel({ harvests, activeId, clonePlanning, onClone, on
   return <section className="harvest-management"><form className="card new-harvest-card" onSubmit={onCreate}><span className="eyebrow">NOVA SAFRA</span><h2>Criar ciclo operacional</h2><label>Nome da safra<input name="harvestName" required placeholder="Safra 2027" /></label><label className="clone-option"><input type="checkbox" checked={clonePlanning} onChange={(event) => onClone(event.target.checked)} /><span><b>Copiar o planejamento da safra atual</b><small>Locais, ensaios e visitas são reaproveitados; registros e notas começam vazios.</small></span></label><button className="primary-button">Confirmar e criar safra</button></form><section className="card harvest-history"><div className="card-head"><div><h2>Histórico de safras</h2><p>Consulte qualidade e situação de cada ciclo.</p></div></div>{harvests.map((harvest) => <article key={harvest.id} className={harvest.id === activeId ? 'active' : ''}><button type="button" onClick={() => onSelect(harvest.id)}><span><b>{harvest.name}</b><small>{harvest.updatedAt ? `Atualizada em ${new Date(harvest.updatedAt).toLocaleDateString('pt-BR')}` : 'Sem atualização'}</small></span><strong>{harvest.quality}/100</strong><em>{harvest.status}</em></button>{harvest.id === activeId && <button className="secondary-button" type="button" onClick={() => onStatus(harvest.id, harvest.status === 'Ativa' ? 'Encerrada' : 'Ativa')}>{harvest.status === 'Ativa' ? 'Encerrar e bloquear registros' : 'Reabrir como administrador'}</button>}</article>)}</section></section>;
 }
 
-function ResultsScreen({ trialList, activities, schedule }: { trialList: Trial[]; activities: Activity[]; schedule: PlannedActivity[] }) {
+function ResultsSummary({ trialList, activities, schedule }: { trialList: Trial[]; activities: Activity[]; schedule: PlannedActivity[] }) {
+  const locations = useContext(ProgramLocations) ?? baseLocations;
   const ranking = locations.map((location) => {
     const overview = localityOverview(location.id, trialList, activities, schedule);
     const errors = activities.filter((activity) => (activity.locationId === location.id || overview.localTrials.some((trial) => trial.id === activity.trial)) && Boolean(activity.alertCategory));
     return { location, overview, errors };
   }).filter((item) => item.overview.localTrials.length).sort((a, b) => b.overview.quality - a.overview.quality);
   const stages = ['Pré-semeadura','Emergência','Perfilhamento','Alongamento','Espigamento','Enchimento de grãos','Maturação'];
-  const rhaProgress = ['RHA_1','RHA_2','RHA_3'].map((rha) => {
+  const rhaProgress = ['RHA_1','RHA_2','RHA_3'].filter((rha) => locations.some((location) => rhaCode(location.rha || location.region) === rha)).map((rha) => {
     const localIds = new Set(locations.filter((location) => rhaCode(location.rha || location.region) === rha).map((location) => location.id));
     const fields = trialList.filter((trial) => localIds.has(trial.locationId));
     const counts = stages.map((stage) => ({ stage, count: fields.filter((trial) => { const sowing = actualSowingDate(trial, activities, schedule); return (sowing ? phenologicalStage(trial, sowing) : 'Pré-semeadura') === stage; }).length }));
@@ -1467,16 +1501,17 @@ function ResultsScreen({ trialList, activities, schedule }: { trialList: Trial[]
     const average = regionTrials.length ? Math.round(regionTrials.reduce((sum, trial) => sum + trial.progress, 0) / regionTrials.length) : 0;
     return { name: region, value: average };
   });
-  return <><PageHead eyebrow="Consolidação" title="Resultados e qualidade" copy="Indicadores gerados pelos registros operacionais da safra 2026." action={<button className="secondary-button">Exportar relatório</button>} />
+  return <><div className="card-head"><div><h2>Síntese de resultados</h2><p>Progresso fenológico, qualidade experimental e ocorrências do contexto selecionado.</p></div></div>
     <section className="result-hero"><div><span className="eyebrow">CONTROLE DA SAFRA</span><h2>{trialsWithActivity} ensaios registrados · qualidade média {averageQuality}/100.</h2><p>{completed} de {schedule.length} atividades do calendário foram concluídas.</p></div><div className="donut" style={{ background: `radial-gradient(circle,#315d46 56%,transparent 57%), conic-gradient(var(--lime) ${coverage}%, rgba(255,255,255,.14) 0)` }}><b>{coverage}%</b><span>executado</span></div></section>
     <section className="rha-stage-grid">{rhaProgress.map(({ rha, total, counts }) => <article className="card" key={rha}><h2>{rhaLabel(rha)} · estádios dos ensaios</h2><p>{total} ensaios · estimativa pela semeadura realizada</p>{counts.map(({ stage, count }) => <div className="stage-distribution" key={stage}><span>{stage}</span><div><i style={{ width: `${total ? count / total * 100 : 0}%` }} /></div><b>{count}</b></div>)}</article>)}</section>
     <section className="card quality-ranking"><h2>Ranking de locais por qualidade experimental</h2><p>Abra um local para conferir a descrição dos erros e os PlotIDs afetados.</p>{ranking.map(({ location, overview, errors }, index) => <details key={location.id}><summary><strong>#{index + 1} {location.name}</strong><span>{rhaLabel(location.rha || location.region)} · {overview.stage}</span><b>{overview.quality}/100</b><span>{errors.length} ocorrências · {overview.localTrials.reduce((sum, trial) => sum + (trial.affectedPlots?.length ?? 0), 0)} parcelas com erro</span></summary><div>{errors.map((error) => <article key={error.id}><b>{error.alertCategory} · {error.date}</b><p>{error.details?.ocorrencia || error.notes}</p><small>{trialList.find((trial) => trial.id === error.trial)?.name ?? error.trial} · PlotIDs: {error.plotIds?.join(', ') || 'Não informados'}</small></article>)}{overview.localTrials.filter((trial) => trial.affectedPlots?.length && !errors.some((error) => error.trial === trial.id)).map((trial) => <article key={trial.id}><b>{trial.name} · ocorrência no croqui</b><p>Parcelas afetadas: {trial.affectedPlots?.join(', ')}</p><small>Parcelas perdidas: {trial.lostPlots?.join(', ') || 'Nenhuma'}</small></article>)}{!errors.length && !overview.localTrials.some((trial) => trial.affectedPlots?.length) && <p>Nenhum erro registrado para este local.</p>}</div></details>)}</section>
-    <section className="result-grid"><article className="card"><h2>Progresso médio por região</h2>{regionProgress.map(({ name, value }) => <div className="result-bar" key={name}><span>{name}</span><div><i style={{ width: `${value}%` }} /></div><b>{value}%</b></div>)}</article><article className="card"><h2>Dados importados</h2><div className="metric-list"><div><span>Ensaios</span><b>{trialList.length}</b></div><div><span>Atividades planejadas</span><b>{schedule.length}</b></div><div><span>Atividades realizadas</span><b>{activities.length}</b></div><div><span>Usuários</span><b>{sourceSummary.users}</b></div></div></article></section>
+
     <section className="card quality-table"><div className="card-head"><div><h2>Classificação dos campos</h2><p>Últimos registros com valorização e depreciação ponderadas.</p></div></div><div className="table-wrap"><table><thead><tr><th>Ensaio</th><th>Atividade</th><th>Data</th><th>Nota</th><th>Classificação</th></tr></thead><tbody>{scored.slice(0, 8).map((activity) => { const trial = trialList.find((item) => item.id === activity.trial); const adjusted = trial ? trialQuality(trial, activities).score : activity.qualityScore; return <tr key={activity.id}><td><b>{trial?.name ?? activity.trial}</b>{trial?.lostPlots?.length ? <small className="lost-plots">{trial.lostPlots.length} perdida(s): {trial.lostPlots.join(', ')}</small> : null}</td><td>{activity.type}</td><td>{activity.date}</td><td><b>{adjusted}/100</b></td><td><Status kind={(adjusted ?? 0) >= 70 ? 'ok' : (adjusted ?? 0) >= 50 ? 'attention' : 'late'}>{adjusted && adjusted >= 85 ? 'Excelente' : adjusted && adjusted >= 70 ? 'Adequado' : adjusted && adjusted >= 50 ? 'Atenção' : 'Crítico'}</Status></td></tr>; })}</tbody></table></div></section>
   </>;
 }
 
 function UsersScreen() {
+  const locations = useContext(ProgramLocations) ?? baseLocations;
   return <><PageHead eyebrow="Equipe · Excel" title="Usuários" copy={`${sourceSummary.users} pessoas com acesso cadastradas na planilha.`} action={<button className="primary-button">＋ Convidar usuário</button>} />
     <section className="card permission-manager"><div className="card-head"><div><span className="eyebrow">HIERARQUIA DE ACESSO</span><h2>Gestão de permissões</h2><p>Os níveis herdam a leitura da plataforma e recebem apenas as ações necessárias ao seu fluxo.</p></div></div><div className="permission-flow">{([['Administrador','Acesso total, usuários e regras'],['Gestor','Indicadores, planejamento e configurações'],['RA','Áreas, atividades e reportes'],['Técnico responsável','Execução e registros de campo']] as const).map(([role, copy], index) => <article key={role}><i>{index + 1}</i><div><b>{role}</b><small>{copy}</small></div><span>{index === 0 ? 'Controle total' : 'Acesso subordinado'}</span></article>)}</div><div className="permission-matrix"><b>Recurso</b><b>ADM</b><b>Gestor</b><b>RA</b><b>Técnico</b>{[['Cadastros e permissões','✓','—','—','—'],['Indicadores e regras','✓','✓','Leitura','Leitura'],['Áreas e planejamento','✓','✓','✓','Leitura'],['Atividades e reportes','✓','✓','✓','✓']].flatMap((row) => row.map((cell, index) => <span key={`${row[0]}-${index}`}>{cell}</span>))}</div></section>
     <section className="user-grid">{importedUsers.map((user, index) => { const initials = user.name.split(' ').map((part) => part[0]).join('').slice(0, 2).toUpperCase(); return <article className="card user-card" key={user.id}><div className={`avatar color-${index}`}>{initials}</div><div><h2>{user.name}</h2><p>{user.role}</p><span>◎ {user.locations}</span></div><Status kind={user.active ? 'ok' : 'attention'}>{user.active ? 'Ativo' : 'Pendente'}</Status><button>•••</button></article>; })}</section>
