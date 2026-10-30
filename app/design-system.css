@@ -61,12 +61,18 @@ button:disabled { cursor: not-allowed; }
 .status-pill, .group-chips span, .quality-badge, .quality-indicator-chips span { border-radius: 9999px; }
 .nav-rail { background: var(--ui-surface-soft); color: var(--ui-text); border-right: 1px solid var(--ui-border); box-shadow: none; }
 .nav-rail nav button { color: var(--ui-muted); font-size: 14px; font-weight: 500; border-radius: 9999px; min-height: 46px; }
+.nav-rail nav button, .nav-rail nav .nav-label { font-size: 12px !important; line-height: 1.5; }
+.nav-rail nav { overflow-x: hidden; }
 .nav-rail nav button:hover { color: var(--ui-text); background: var(--ui-surface); }
 .nav-rail nav button.active { color: var(--ui-accent); background: var(--ui-accent-soft); box-shadow: none; }
 .nav-rail .nav-icon, .nav-rail .nav-icon svg { color: inherit; stroke: currentColor; }
 .nav-rail > .brand-mark strong { color: var(--ui-text); font-weight: 550; }
 .nav-rail > .brand-mark small, .nav-rail .sidebar-help { color: var(--ui-muted); }
 .brand-mark > .brand-logo { background: #245744; border-radius: 50%; box-shadow: none; }
+.brand-mark > .brand-logo, .brand-mark.light > .brand-logo { background: transparent !important; border: 0; box-shadow: none; }
+.brand-mark > .brand-logo img { filter: brightness(0) saturate(100%) opacity(.82); object-fit: contain; }
+:root[data-theme='dark'] .brand-mark > .brand-logo img { filter: brightness(0) invert(1) opacity(.9); }
+.login-story .brand-mark > .brand-logo img { filter: none; }
 .program-hierarchy { gap: 14px; }
 .program-hierarchy button { border-radius: 20px; background: var(--ui-surface); color: var(--ui-text); border-color: var(--ui-border); box-shadow: none; padding: 18px 22px; }
 .program-hierarchy button.active { color: var(--ui-accent); background: var(--ui-accent-soft); border-color: transparent; }
