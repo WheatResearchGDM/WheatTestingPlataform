@@ -7,6 +7,7 @@ type Location = { id: string; name: string; city: string; lat: number; lng: numb
 type Trial = { id: string; locationId: string; name: string; type: string; areaCategory?: string };
 type Plan = { id: string; trialId: string; locationId?: string; areaCategory?: string; activity: string; start: string; status: string };
 type Point = { lat: number; lng: number; label?: string };
+const applicationOpenedAt = new Date();
 
 const distanceKm = (a: Point, b: Point) => {
   const rad = (value: number) => value * Math.PI / 180;
@@ -16,18 +17,20 @@ const distanceKm = (a: Point, b: Point) => {
 };
 
 export default function RoutePlanner({ locations, trials, schedule, weather }: { locations: Location[]; trials: Trial[]; schedule: Plan[]; weather: LocationWeather[] }) {
-  const today = new Date().toISOString().slice(0, 10);
-  const limitDate = new Date(`${today}T12:00:00`); limitDate.setDate(limitDate.getDate() + (7 - limitDate.getDay()) % 7);
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' });
+  const startDate = new Date(`${today}T12:00:00`); startDate.setDate(startDate.getDate() - 5);
+  const lowerLimit = startDate.toISOString().slice(0, 10);
+  const limitDate = new Date(`${today}T12:00:00`); limitDate.setDate(limitDate.getDate() + 5);
   const limit = limitDate.toISOString().slice(0, 10);
-  const weeklyPlans = schedule.filter((item) => item.status !== 'Concluído' && item.start >= today && item.start <= limit);
+  const weeklyPlans = schedule.filter((item) => item.status !== 'Concluído' && item.start >= lowerLimit && item.start <= limit);
   const weeklyLocationIds = [...new Set(weeklyPlans.map((item) => item.locationId ?? trials.find((trial) => trial.id === item.trialId)?.locationId).filter(Boolean))] as string[];
   const [mode, setMode] = useState<'week' | 'extra'>('week');
   const [selected, setSelected] = useState<string[]>(weeklyLocationIds);
   const [extraSelected, setExtraSelected] = useState<string[]>([]);
   const [originId, setOriginId] = useState(locations[0]?.id ?? '');
   const [liveOrigin, setLiveOrigin] = useState<Point | null>(null);
-  const [fieldMinutes, setFieldMinutes] = useState(90);
-  const [startTime, setStartTime] = useState('07:30');
+  const [fieldMinutes, setFieldMinutes] = useState(30);
+  const [startTime, setStartTime] = useState(() => applicationOpenedAt.toLocaleTimeString('pt-BR', { timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit' }));
   const targetIds = mode === 'week' ? selected : extraSelected;
   const origin = liveOrigin ?? locations.find((location) => location.id === originId) ?? locations[0];
   const route = useMemo(() => {
@@ -48,7 +51,7 @@ export default function RoutePlanner({ locations, trials, schedule, weather }: {
   const startParts = startTime.split(':').map(Number); let elapsed = 0;
   const rainAlerts = [...new Map(weeklyPlans.flatMap((plan) => { const trial = trials.find((item) => item.id === plan.trialId); const locationId = plan.locationId ?? trial?.locationId; const day = weather.find((item) => item.locationId === locationId)?.week?.find((item) => item.date === plan.start); return day && day.precipitation >= 5 ? [[`${locationId}-${plan.start}-${plan.activity}`, { plan, trial, location: locations.find((item) => item.id === locationId), rain: day.precipitation }]] : []; })).values()];
 
-  return <section className="card route-planner"><header><div><span className="eyebrow">PLANEJADOR INTELIGENTE</span><h2>Rota otimizada de atividades</h2><p>As áreas com atividades até domingo vêm selecionadas. Acrescente ou remova locais e ajuste a permanência em campo.</p></div><div className="route-mode"><button className={mode === 'week' ? 'active' : ''} onClick={() => setMode('week')}>Agenda da semana</button><button className={mode === 'extra' ? 'active' : ''} onClick={() => setMode('extra')}>Visita avulsa</button></div></header>
+  return <section className="card route-planner"><header><div><span className="eyebrow">PLANEJADOR INTELIGENTE</span><h2>Rota otimizada de atividades</h2><p>As áreas com visitas pendentes entre cinco dias antes e cinco dias depois de hoje vêm selecionadas. Acrescente ou remova locais e ajuste a permanência em campo.</p></div><div className="route-mode"><button className={mode === 'week' ? 'active' : ''} onClick={() => setMode('week')}>Visitas próximas (±5 dias)</button><button className={mode === 'extra' ? 'active' : ''} onClick={() => setMode('extra')}>Visita avulsa</button></div></header>
     <div className="route-settings"><label>Saída<select value={originId} onChange={(event) => { setOriginId(event.target.value); setLiveOrigin(null); }}>{locations.map((location) => <option value={location.id} key={location.id}>{location.name}</option>)}</select></label><button type="button" className="secondary-button" onClick={() => navigator.geolocation?.getCurrentPosition((position) => setLiveOrigin({ lat: position.coords.latitude, lng: position.coords.longitude, label: 'Minha localização' }))}>⌖ Usar localização atual</button><label>Início<input type="time" value={startTime} onChange={(event) => setStartTime(event.target.value)} /></label><label>Permanência/local<input type="number" min="15" step="15" value={fieldMinutes} onChange={(event) => setFieldMinutes(Number(event.target.value))} /> min</label></div>
     {<div className="route-location-picker">{locations.map((location) => <label key={location.id}><input type="checkbox" checked={targetIds.includes(location.id)} onChange={(event) => { const update = event.target.checked ? [...targetIds, location.id] : targetIds.filter((id) => id !== location.id); mode === 'week' ? setSelected(update) : setExtraSelected(update); }} /><span>✓</span><b>{location.name}</b><small>{location.city}</small></label>)}</div>}
     {rainAlerts.length > 0 && <div className="route-rain-alert"><span>☂</span><div><b>{rainAlerts.length} atividade(s) com risco de chuva</b>{rainAlerts.slice(0, 4).map(({ plan, location, rain }) => <small key={plan.id}>{plan.start.split('-').reverse().join('/')} · {location?.name} · {plan.activity} · {rain.toFixed(1)} mm — considerar remanejamento</small>)}</div></div>}

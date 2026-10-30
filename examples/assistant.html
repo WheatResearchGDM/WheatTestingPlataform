@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Assistente de navegação · exemplo independente</title>
+  <link rel="stylesheet" href="../app/design-system.css">
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; }
+    .demo-shell { display: grid; grid-template-columns: 240px 1fr; min-height: 100vh; }
+    .demo-nav { padding: 28px 20px; background: var(--ui-surface-soft); }
+    .demo-nav nav { display: grid; gap: 8px; margin-top: 28px; }
+    .demo-nav button { padding: 12px 16px; border: 0; border-radius: 9999px; text-align: left; font: inherit; color: var(--ui-text); background: transparent; }
+    .demo-nav button[aria-current] { background: var(--ui-accent-soft); }
+    main { padding: 44px; }
+    .demo-card { padding: 28px; border: 1px solid var(--ui-border); border-radius: 24px; background: var(--ui-surface); max-width: 900px; }
+    h1, h2 { font-weight: 550; letter-spacing: -.02em; }
+    p { max-width: 65ch; }
+    @media(max-width: 700px) { .demo-shell { grid-template-columns: 1fr; } main { padding: 24px; } }
+  </style>
+</head>
+<body>
+  <div class="demo-shell">
+    <aside class="demo-nav" aria-label="Navegação">
+      <strong>Wheat Testing Brazil</strong>
+      <nav aria-label="Módulos">
+        <button type="button" data-route="dashboard" title="Relatórios" aria-current="page">Visão geral e relatórios</button>
+        <button type="button" data-route="planejamento" title="Calendário">Calendário</button>
+        <button type="button" data-route="cadastros" title="Configurações">Configurações</button>
+      </nav>
+    </aside>
+    <main id="main-content" class="content">
+      <header><p class="program-breadcrumb">Brasil / Programa U</p><h1>Visão geral</h1></header>
+      <section class="demo-card" aria-label="Demonstração">
+        <h2>Encontre o que precisa</h2>
+        <p id="demo-description">Abra o assistente e digite “Abrir calendário”. O menu será acionado e receberá um destaque visual.</p>
+      </section>
+    </main>
+  </div>
+  <script type="module">
+    import { mountNavigationAssistant } from '../lib/navigation-assistant.js';
+    const pages = {
+      dashboard: ['Visão geral', 'Síntese da rede, qualidade experimental e cumprimento das atividades.'],
+      planejamento: ['Calendário da safra', 'Atividades previstas com local, tipo de ensaio e data.'],
+      cadastros: ['Gerenciamento', 'Cadastros, configurações e organização dos programas.'],
+    };
+    document.querySelectorAll('[data-route]').forEach((button) => {
+      button.addEventListener('click', () => {
+        document.querySelectorAll('[aria-current]').forEach((element) => element.removeAttribute('aria-current'));
+        button.setAttribute('aria-current', 'page');
+        const [title, description] = pages[button.dataset.route];
+        document.querySelector('h1').textContent = title;
+        document.querySelector('#demo-description').textContent = description;
+      });
+    });
+    const unmount = mountNavigationAssistant();
+    window.addEventListener('pagehide', unmount, { once: true });
+  </script>
+</body>
+</html>

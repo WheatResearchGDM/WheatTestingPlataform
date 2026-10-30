@@ -6,6 +6,7 @@ import type { NetworkLocation } from '../components/NetworkMap';
 import type { LayoutFinalization } from '../components/FieldLayoutMap';
 import { fetchWeatherConditions, type LocationWeather } from '../lib/weatherAlerts';
 import RoutePlanner from '../components/RoutePlanner';
+import { mountNavigationAssistant } from '../lib/navigation-assistant.js';
 import {
   importedActivities,
   importedLocations,
@@ -268,14 +269,22 @@ async function readSpreadsheet(file: File, dataset: string) {
 }
 
 const ProgramLocations = createContext<NetworkLocation[] | null>(null);
+function locationProgram(location: NetworkLocation): 'U' | 'K' | 'X' {
+  // Compatibility keeps legacy sites in their existing folder; new sites always store program independently.
+  return location.program ?? ({ RHA_1: 'U', RHA_2: 'K', RHA_3: 'X' } as const)[rhaCode(location.rha || location.region) as 'RHA_1' | 'RHA_2' | 'RHA_3'];
+}
 const programs = [
-  { id: 'RHA_1', name: 'RHA I', program: 'Programa U' },
-  { id: 'RHA_2', name: 'RHA II', program: 'Programa K' },
-  { id: 'RHA_3', name: 'RHA III', program: 'Programa X' },
+  { id: 'U', name: 'Programa U', program: 'Programa U' },
+  { id: 'K', name: 'Programa K', program: 'Programa K' },
+  { id: 'X', name: 'Programa X', program: 'Programa X' },
 ];
 export default function Home() {
   const [programId, setProgramId] = useState('Brasil');
   const [phase, setPhase] = useState<'login' | 'profile' | 'app'>('login');
+  useEffect(() => {
+    if (phase !== 'app') return;
+    return mountNavigationAssistant();
+  }, [phase]);
   const [currentRole, setCurrentRole] = useState<AppRole>(() => typeof window === 'undefined' ? 'Administrador' : (localStorage.getItem('field-wheat-current-role-v1') as AppRole) || 'Administrador');
   const [screen, setScreen] = useState<Screen>('dashboard');
   const [dataVersion, setDataVersion] = useState(0);
@@ -351,7 +360,7 @@ export default function Home() {
   }
 
   useEffect(() => {
-    if (phase === 'app' && !weatherConditions.length && !weatherChecking) void refreshWeatherConditions();
+    if (phase === 'app' && !weatherChecking && (!weatherConditions.length || !weatherCheckedAt || Date.now() - new Date(weatherCheckedAt).getTime() > 3 * 60 * 60 * 1000)) void refreshWeatherConditions();
     // A primeira consulta ocorre somente ao entrar na plataforma; as demais são manuais.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase]);
@@ -392,7 +401,7 @@ export default function Home() {
       const snapshot = snapshots[activeHarvestId];
       const storedLocations = JSON.parse(localStorage.getItem('field-wheat-locations-clean-v1') ?? '[]') as NetworkLocation[];
       const storedTrials = JSON.parse(localStorage.getItem('field-wheat-imported-trials-clean-v1') ?? '[]') as Trial[];
-      const savedLocations = snapshot?.locations?.length ? snapshot.locations : storedLocations.length ? storedLocations : baseLocations;
+      const savedLocations = (snapshot?.locations?.length ? snapshot.locations : storedLocations.length ? storedLocations : baseLocations).map((location) => ({ ...location, program: locationProgram(location) }));
       const savedTrials = snapshot?.trials?.length ? snapshot.trials : storedTrials.length ? storedTrials : baseTrials;
       locations.splice(0, locations.length, ...savedLocations);
       trials.splice(0, trials.length, ...savedTrials);
@@ -453,14 +462,24 @@ export default function Home() {
     const next = harvests.map((harvest) => harvest.id === harvestId ? { ...harvest, status, quality: harvest.id === activeHarvestId ? qualityAverage(activities) : harvest.quality, updatedAt: new Date().toISOString() } : harvest); setHarvests(next); localStorage.setItem('field-wheat-harvests-v2', JSON.stringify(next)); persistHarvestSnapshot(); setToast(status === 'Encerrada' ? 'Safra encerrada e bloqueada para novos registros.' : 'Safra reaberta pelo administrador.'); setTimeout(() => setToast(''), 3500);
   }
 
-  const scopedLocations = locations.filter((location) => programId === 'Brasil' || rhaCode(location.rha || location.region) === programId);
+  const scopedLocations = locations.filter((location) => programId === 'Brasil' || locationProgram(location) === programId);
   const scopedLocationIds = new Set(scopedLocations.map((location) => location.id));
   const scopedTrials = allTrials.filter((trial) => scopedLocationIds.has(trial.locationId));
   const scopedTrialIds = new Set(scopedTrials.map((trial) => trial.id));
   const scopedSchedule = schedule.filter((item) => item.locationId ? scopedLocationIds.has(item.locationId) : scopedTrialIds.has(item.trialId));
   const scopedActivities = activities.filter((item) => item.locationId ? scopedLocationIds.has(item.locationId) : scopedTrialIds.has(item.trial));
   const activeProgram = programs.find((program) => program.id === programId);
-  const selectProgram = (id: string) => { setProgramId(id); setScreen('dashboard'); setSelectedPlan(null); setViewContext({}); setSelectedTrial(allTrials.find((trial) => locations.some((location) => location.id === trial.locationId && rhaCode(location.rha || location.region) === id)) ?? blankTrial); };
+  function assignLocationProgram(locationId: string, program: 'U' | 'K' | 'X') {
+    const nextLocations = locations.map((location) => ({ ...location, program: location.id === locationId ? program : locationProgram(location) }));
+    locations.splice(0, locations.length, ...nextLocations);
+    localStorage.setItem('field-wheat-locations-clean-v1', JSON.stringify(nextLocations));
+    const source = JSON.parse(localStorage.getItem('field-wheat-unified-source-v1') ?? '[]') as Record<string, unknown>[];
+    const nextSource = source.map((row) => String(row.local_codigo) === locationId ? { ...row, programa: program } : row);
+    localStorage.setItem('field-wheat-unified-source-v1', JSON.stringify(nextSource));
+    const updatedAt = persistHarvestSnapshot({ locations: nextLocations, source: nextSource });
+    touchHarvest(updatedAt); setDataVersion((value) => value + 1);
+  }
+  const selectProgram = (id: string) => { setProgramId(id); if (screen === 'detalhe') setScreen('ensaios'); setSelectedPlan(null); setViewContext({}); setSelectedTrial(allTrials.find((trial) => locations.some((location) => location.id === trial.locationId && locationProgram(location) === id)) ?? blankTrial); };
   const go = (next: Screen) => { if (programId === 'Brasil' && !['dashboard','usuarios'].includes(next)) { setToast('Abra um programa para acessar o acompanhamento operacional.'); return; } setScreen(next); setMenuOpen(false); window.scrollTo({ top: 0, behavior: 'smooth' }); };
   function openFiltered(context: ViewContext) {
     setViewContext(context);
@@ -610,7 +629,7 @@ export default function Home() {
     const date = (value: unknown, fallback: string = sourceSummary.importedAt) => clean(value).slice(0, 10) || fallback;
     const unique = <T,>(items: T[], key: (item: T) => string) => [...new Map(items.map((item) => [key(item), item])).values()];
     const importedLocations = unique(rows.map((row): NetworkLocation => ({
-      id: clean(row.local_codigo), name: clean(row.local_nome), city: [clean(row.municipio), clean(row.uf)].filter(Boolean).join(' - '),
+      id: clean(row.local_codigo), name: clean(row.local_nome), city: [clean(row.municipio), clean(row.uf)].filter(Boolean).join(' - '), program: (['U','K','X'].includes(clean(row.programa)) ? clean(row.programa) : programId === 'Brasil' ? 'U' : programId) as 'U' | 'K' | 'X',
       region: rhaCode(clean(row.rha_regiao) || clean(row.vcu_regiao)), rha: rhaCode(clean(row.rha_regiao) || clean(row.vcu_regiao)),
       lat: Number(row.latitude) || -29.63, lng: Number(row.longitude) || -53.05, trials: 0, plots: 0, status: 'ok',
     })).filter((item) => item.id && item.name), (item) => item.id);
@@ -669,7 +688,7 @@ export default function Home() {
   function finalizeLayoutPlanning(payload: LayoutFinalization) {
     if (activeHarvest?.status === 'Encerrada') { setToast('Safra encerrada. Reabra-a antes de finalizar uma implantação.'); return; }
     const locationCity = /\s-\s[A-Z]{2}$/.test(payload.location.city) ? payload.location.city : `${payload.location.city} - RS`;
-    const nextLocation: NetworkLocation = { id: payload.location.id, name: payload.location.name, city: locationCity, region: programId === 'Brasil' ? rhaCode(payload.location.rha || payload.location.region) : programId, rha: programId === 'Brasil' ? rhaCode(payload.location.rha || payload.location.region) : programId, lat: payload.location.lat, lng: payload.location.lng, trials: payload.allocations.length, plots: payload.allocations.reduce((sum, allocation) => sum + allocation.plotCount, 0), status: 'ok' };
+    const nextLocation: NetworkLocation = { id: payload.location.id, name: payload.location.name, city: locationCity, program: (programId === 'Brasil' ? 'U' : programId) as 'U' | 'K' | 'X', region: rhaCode(payload.location.rha || payload.location.region), rha: rhaCode(payload.location.rha || payload.location.region), lat: payload.location.lat, lng: payload.location.lng, trials: payload.allocations.length, plots: payload.allocations.reduce((sum, allocation) => sum + allocation.plotCount, 0), status: 'ok' };
     const areaText = payload.areaType.toLowerCase();
     const group: MacroGroup = areaText.includes('cole') ? 'Coleção' : areaText.includes('founder') ? 'Founder' : /^pd/.test(areaText) ? 'PD' : areaText.includes('multi') ? 'Multiqualidades' : areaText.includes('outro') ? 'Outro' : 'Ensaios';
     const year = Number(payload.plannedSowingDate.slice(0, 4)) || new Date().getFullYear();
@@ -693,7 +712,7 @@ export default function Home() {
     const nextActivities = activities.filter((item) => !removedTrialIds.has(item.trial));
     const nextLocations = [...locations.filter((item) => item.id !== nextLocation.id), { ...nextLocation, trials: nextTrials.filter((trial) => trial.locationId === nextLocation.id).length, plots: nextTrials.filter((trial) => trial.locationId === nextLocation.id).reduce((sum, trial) => sum + trial.plots, 0) }];
     const existingSource = JSON.parse(localStorage.getItem('field-wheat-unified-source-v1') ?? '[]') as Record<string, unknown>[];
-    const nextRows = payload.allocations.flatMap((allocation) => { const trialId = `${allocation.id}-${nextLocation.id}-${payload.mapId}`; return selectedTemplates.map((template) => ({ safra: activeHarvest?.name, tipo_registro: 'Croqui de implantação', mapa_id: payload.mapId, mapa_nome: payload.mapName, local_codigo: nextLocation.id, local_nome: nextLocation.name, municipio: payload.location.city, latitude: nextLocation.lat, longitude: nextLocation.lng, tipo_area: payload.areaType, arquivo_croqui: payload.fileName, ensaio_codigo: trialId, ensaio_nome: allocation.name, codigo_alocacao: allocation.code, cor_ensaio: allocation.color, parcela_inicial: allocation.startPlotId, parcela_final: allocation.endPlotId, parcelas: allocation.plotCount, primeira_parcela_latitude: allocation.firstPlotCoordinate[0], primeira_parcela_longitude: allocation.firstPlotCoordinate[1], data_semeadura_prevista: payload.plannedSowingDate, visita_codigo: `${nextLocation.id}-${payload.mapId}-${template.id}`, atividade_descricao: template.name, estadio_fenologico: template.stage, data_prevista: addDays(payload.plannedSowingDate, template.offset), status_planejamento: 'Não iniciado' })); });
+    const nextRows = payload.allocations.flatMap((allocation) => { const trialId = `${allocation.id}-${nextLocation.id}-${payload.mapId}`; return selectedTemplates.map((template) => ({ safra: activeHarvest?.name, programa: nextLocation.program, tipo_registro: 'Croqui de implantação', mapa_id: payload.mapId, mapa_nome: payload.mapName, local_codigo: nextLocation.id, local_nome: nextLocation.name, municipio: payload.location.city, latitude: nextLocation.lat, longitude: nextLocation.lng, tipo_area: payload.areaType, arquivo_croqui: payload.fileName, ensaio_codigo: trialId, ensaio_nome: allocation.name, codigo_alocacao: allocation.code, cor_ensaio: allocation.color, parcela_inicial: allocation.startPlotId, parcela_final: allocation.endPlotId, parcelas: allocation.plotCount, primeira_parcela_latitude: allocation.firstPlotCoordinate[0], primeira_parcela_longitude: allocation.firstPlotCoordinate[1], data_semeadura_prevista: payload.plannedSowingDate, visita_codigo: `${nextLocation.id}-${payload.mapId}-${template.id}`, atividade_descricao: template.name, estadio_fenologico: template.stage, data_prevista: addDays(payload.plannedSowingDate, template.offset), status_planejamento: 'Não iniciado' })); });
     const nextSource = [...existingSource.filter((row) => !(String(row.local_codigo) === nextLocation.id && String(row.mapa_id) === payload.mapId)), ...nextRows];
     locations.splice(0, locations.length, ...nextLocations); trials.splice(0, trials.length, ...nextTrials); setRegisteredTrials([]); setSchedule(nextSchedule); setActivities(nextActivities);
     localStorage.setItem('field-wheat-locations-clean-v1', JSON.stringify(nextLocations)); localStorage.setItem('field-wheat-imported-trials-clean-v1', JSON.stringify(nextTrials)); localStorage.setItem('field-wheat-schedule-clean-v1', JSON.stringify(nextSchedule)); localStorage.setItem('field-wheat-activities-clean-v1', JSON.stringify(nextActivities)); localStorage.setItem('field-wheat-unified-source-v1', JSON.stringify(nextSource));
@@ -702,9 +721,9 @@ export default function Home() {
 
   function addManagedLocation(input: { code: string; name: string; city: string; uf: string; region: string; lat: number; lng: number }) {
     if (activeHarvest?.status === 'Encerrada') { setToast('Safra encerrada. Reabra-a para editar cadastros.'); return; }
-    const nextLocation: NetworkLocation = { id: input.code.trim().toUpperCase(), name: input.name.trim(), city: `${input.city.trim()} - ${input.uf.trim().toUpperCase()}`, region: (programId === 'Brasil' ? rhaCode(input.region) : programId), rha: (programId === 'Brasil' ? rhaCode(input.region) : programId), lat: input.lat || -29.63, lng: input.lng || -53.05, trials: 0, plots: 0, status: 'ok' };
+    const nextLocation: NetworkLocation = { id: input.code.trim().toUpperCase(), name: input.name.trim(), city: `${input.city.trim()} - ${input.uf.trim().toUpperCase()}`, program: (programId === 'Brasil' ? 'U' : programId) as 'U' | 'K' | 'X', region: rhaCode(input.region), rha: rhaCode(input.region), lat: input.lat || -29.63, lng: input.lng || -53.05, trials: 0, plots: 0, status: 'ok' };
     const nextLocations = [...locations.filter((item) => item.id !== nextLocation.id), nextLocation]; locations.splice(0, locations.length, ...nextLocations); localStorage.setItem('field-wheat-locations-clean-v1', JSON.stringify(nextLocations));
-    const source = JSON.parse(localStorage.getItem('field-wheat-unified-source-v1') ?? '[]') as Record<string, unknown>[]; const nextSource = [...source.filter((row) => String(row.local_codigo) !== nextLocation.id || row.ensaio_codigo), { safra: activeHarvest?.name, local_codigo: nextLocation.id, local_nome: nextLocation.name, municipio: input.city, uf: input.uf.toUpperCase(), latitude: nextLocation.lat, longitude: nextLocation.lng, rha_regiao: rhaLabel(nextLocation.rha), tipo_registro: 'Localidade' }]; localStorage.setItem('field-wheat-unified-source-v1', JSON.stringify(nextSource));
+    const source = JSON.parse(localStorage.getItem('field-wheat-unified-source-v1') ?? '[]') as Record<string, unknown>[]; const nextSource = [...source.filter((row) => String(row.local_codigo) !== nextLocation.id || row.ensaio_codigo), { safra: activeHarvest?.name, programa: nextLocation.program, local_codigo: nextLocation.id, local_nome: nextLocation.name, municipio: input.city, uf: input.uf.toUpperCase(), latitude: nextLocation.lat, longitude: nextLocation.lng, rha_regiao: rhaLabel(nextLocation.rha), tipo_registro: 'Localidade' }]; localStorage.setItem('field-wheat-unified-source-v1', JSON.stringify(nextSource));
     const updatedAt = persistHarvestSnapshot({ locations: nextLocations, source: nextSource }); touchHarvest(updatedAt); setDataVersion((value) => value + 1); setToast(`${nextLocation.name} adicionada à ${activeHarvest?.name}.`); setTimeout(() => setToast(''), 3500);
   }
 
@@ -873,7 +892,7 @@ export default function Home() {
       <aside className={menuOpen ? 'sidebar nav-rail open' : 'sidebar nav-rail'} aria-label="Menu principal">
         <Brand light compact />
         <nav aria-label="Navegação principal">
-          {navItems.filter((item) => roleScreens[currentRole].includes(item.screen) && (programId !== 'Brasil' || ['dashboard','usuarios'].includes(item.screen))).map((item) => <button title={item.label} key={item.screen} className={screen === item.screen ? 'active' : ''} onClick={() => go(item.screen)}><span className="nav-icon"><NavIcon screen={item.screen} /></span><span className="nav-label">{item.label}</span></button>)}
+          {navItems.filter((item) => roleScreens[currentRole].includes(item.screen) && (programId !== 'Brasil' || ['dashboard','usuarios'].includes(item.screen))).map((item) => <button data-route={item.screen} aria-current={screen === item.screen ? 'page' : undefined} title={item.label} key={item.screen} className={screen === item.screen ? 'active' : ''} onClick={() => go(item.screen)}><span className="nav-icon"><NavIcon screen={item.screen} /></span><span className="nav-label">{item.label}</span></button>)}
         </nav>
         <div className="sidebar-help"><span>?</span><div><b>Precisa de ajuda?</b><small>Suporte da plataforma</small></div></div>
       </aside>
@@ -890,12 +909,13 @@ export default function Home() {
 
         <main className="content">
           <section className="program-hierarchy" aria-label="Pastas de programas">
-            <button className={programId === 'Brasil' ? 'active' : ''} onClick={() => selectProgram('Brasil')}>▣ Brasil<small>Síntese nacional</small></button>
-            <div>{programs.map((program) => <button key={program.id} className={programId === program.id ? 'active' : ''} onClick={() => selectProgram(program.id)}><span>▱ {program.name}</span><b>{program.program}</b><small>{locations.filter((location) => rhaCode(location.rha || location.region) === program.id).length} locais · {allTrials.filter((trial) => locations.some((location) => location.id === trial.locationId && rhaCode(location.rha || location.region) === program.id)).length} ensaios</small></button>)}</div>
+            <button data-program="Brasil" className={programId === 'Brasil' ? 'active' : ''} onClick={() => selectProgram('Brasil')}>▣ Brasil<small>Síntese nacional</small></button>
+            <div>{programs.map((program) => <button data-program={program.id} key={program.id} className={programId === program.id ? 'active' : ''} onClick={() => selectProgram(program.id)}><span>▱ {program.name}</span><b>Rede de locais</b><small>{locations.filter((location) => locationProgram(location) === program.id).length} locais · {allTrials.filter((trial) => locations.some((location) => location.id === trial.locationId && locationProgram(location) === program.id)).length} ensaios</small></button>)}</div>
           </section>
-          <div className="program-breadcrumb">Brasil{activeProgram ? ` / ${activeProgram.name} / ${activeProgram.program}` : ' / Síntese nacional'}</div>
+          <div className="program-breadcrumb">Brasil{activeProgram ? ` / ${activeProgram.name}` : ' / Síntese nacional'}</div>
+          {screen === 'cadastros' && ['Administrador','Gestor','RA'].includes(currentRole) && <details className="card program-assignment"><summary>Organizar locais por programa · independente da RHA</summary><p>Transferir o local preserva seus ensaios, croquis, RHA e registros.</p>{locations.map((location) => <label key={location.id}><span>{location.name} · {rhaLabel(location.rha || location.region)}</span><select aria-label={`Programa de ${location.name}`} value={locationProgram(location)} onChange={(event) => assignLocationProgram(location.id, event.target.value as 'U' | 'K' | 'X')}>{programs.map((program) => <option key={program.id} value={program.id}>{program.name}</option>)}</select></label>)}</details>}
           <ProgramLocations.Provider value={scopedLocations}><div key={programId} className={programId === 'Brasil' ? 'national-summary' : 'program-workspace'}>
-          {screen === 'dashboard' && <><Dashboard trialList={scopedTrials} activities={scopedActivities} schedule={scopedSchedule} harvests={harvests} activeHarvestId={activeHarvestId} onHarvest={switchHarvest} onNavigate={go} onFilter={openFiltered} onTrial={(trial) => { setSelectedTrial(trial); go('detalhe'); }} /><ResultsSummary trialList={scopedTrials} activities={scopedActivities} schedule={scopedSchedule} /></>}
+          {screen === 'dashboard' && <><Dashboard trialList={scopedTrials} activities={scopedActivities} schedule={scopedSchedule} harvests={harvests} activeHarvestId={activeHarvestId} onHarvest={switchHarvest} onNavigate={go} onFilter={openFiltered} onTrial={(trial) => { setSelectedTrial(trial); go('detalhe'); }} /></>}
           {screen === 'mapa' && <MapScreen harvestId={activeHarvestId} trialList={scopedTrials} activities={scopedActivities} schedule={scopedSchedule} weatherConditions={weatherConditions.filter((item) => scopedLocationIds.has(item.locationId))} weatherChecking={weatherChecking} weatherCheckedAt={weatherCheckedAt} onRefreshWeather={refreshWeatherConditions} onLocation={(locationId) => openFiltered({ locationId })} />}
           {screen === 'clima' && <WeatherScreen weatherConditions={weatherConditions.filter((item) => scopedLocationIds.has(item.locationId))} weatherChecking={weatherChecking} weatherCheckedAt={weatherCheckedAt} onRefresh={refreshWeatherConditions} />}
           {screen === 'ensaios' && <TrialsScreen trialList={scopedTrials} activities={scopedActivities} schedule={scopedSchedule} context={viewContext} onClearContext={() => setViewContext({})} onNew={() => go('cadastros')} onTrial={(trial) => { setSelectedTrial(trial); go('detalhe'); }} />}
@@ -947,80 +967,44 @@ function PageHead({ eyebrow, title, copy, action }: { eyebrow: string; title: st
 
 function Dashboard({ trialList, activities, schedule, harvests, activeHarvestId, onHarvest, onNavigate, onFilter, onTrial }: { trialList: Trial[]; activities: Activity[]; schedule: PlannedActivity[]; harvests: Harvest[]; activeHarvestId: string; onHarvest: (id: string) => void; onNavigate: (s: Screen) => void; onFilter: (context: ViewContext) => void; onTrial: (trial: Trial) => void }) {
   const locations = useContext(ProgramLocations) ?? baseLocations;
-  const [alertsOpen, setAlertsOpen] = useState(false);
-  const criticalFieldAlerts: { id: string; locationId: string; type: string; detail: string; time: string; level: string }[] = [];
-  const localityStages = locations.map((location) => ({ location, ...localityOverview(location.id, trialList, activities, schedule) })).filter((item) => item.localTrials.length > 0);
-  const alertCountFor = (locationId: string) => criticalFieldAlerts.filter((alert) => alert.locationId === locationId).length;
-  const qualityLocations: NetworkLocation[] = locations.map((location) => {
-    const overview = localityOverview(location.id, trialList, activities, schedule);
-    return overview.localTrials.length ? { ...location, qualityTone: overview.tone, qualityScore: overview.quality, plantedPercent: overview.plantedPercent, phenologicalStage: overview.stage, alertCount: alertCountFor(location.id) } : { ...location, qualityTone: 'neutral', plantedPercent: 0, phenologicalStage: 'Sem ensaios', alertCount: 0 };
-  });
-  const totalPlanted = trialList.filter((trial) => Boolean(actualSowingDate(trial, activities, schedule))).length;
-  const plantedPercent = trialList.length ? Math.round((totalPlanted / trialList.length) * 100) : 0;
-  const qualityByRegion = (region: string) => {
-    const locationIds = new Set(locations.filter((location) => rhaCode(location.rha || location.region) === region).map((location) => location.id));
-    const regionTrials = trialList.filter((trial) => locationIds.has(trial.locationId));
-    return regionTrials.length ? Math.round(regionTrials.reduce((sum, trial) => sum + trialQuality(trial, activities).score, 0) / regionTrials.length) : 0;
+  const [qualityOpen, setQualityOpen] = useState(false);
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' });
+  const applies = (activity: Activity, trial: Trial) => activity.trial === trial.id || activity.locationId === trial.locationId && (activity.scope === 'Área total' || activity.scope === 'Local inteiro' || activity.details?.categoria_area === (trial.areaCategory ?? trial.type));
+  const harvested = (trial: Trial) => activities.some((activity) => activity.stream === 'operational' && activity.macroStage === 'Colheita' && activity.details?.condicao_operacao !== 'Não executado' && applies(activity, trial));
+  const planted = trialList.filter((trial) => Boolean(actualSowingDate(trial, activities, schedule)));
+  const harvestedCount = trialList.filter(harvested).length;
+  const conducting = planted.filter((trial) => !harvested(trial));
+  const plantedPercent = trialList.length ? Math.round(planted.length / trialList.length * 100) : 0;
+  const harvestDates = trialList.filter((trial) => !harvested(trial)).map((trial) => trial.harvest).filter(Boolean).sort();
+  const nearest = harvestDates.find((date) => date >= today) ?? harvestDates.at(-1);
+  const daysToHarvest = nearest ? daysBetween(today, nearest) : undefined;
+  const qualityAverage = trialList.length ? Math.round(trialList.reduce((sum, trial) => sum + trialQuality(trial, activities).score, 0) / trialList.length) : 0;
+  const completed = activities.filter((activity) => activity.plannedId && !activity.alertCategory);
+  const completedLate = completed.filter((activity) => { const plan = schedule.find((item) => item.id === activity.plannedId); return plan && activityDateIso(activity.date) > plan.end; }).length;
+  const overdue = schedule.filter((plan) => plan.status !== 'Concluído' && plan.end < today).length;
+  const ranked = locations.map((location) => ({ location, overview: localityOverview(location.id, trialList, activities, schedule) })).filter((entry) => entry.overview.localTrials.length).sort((a, b) => b.overview.quality - a.overview.quality);
+  const qualityDetail = (trial: Trial) => {
+    const quality = trialQuality(trial, activities);
+    const records = activities.filter((activity) => applies(activity, trial));
+    const field = records.find((activity) => activity.stream === 'field' && activity.qualityScore !== undefined);
+    const unique = new Map(quality.alerts.map((alert) => [alert.id, alert]));
+    return <article className="macro-trial-quality" key={trial.id}><button className="text-button" onClick={() => onTrial(trial)}>{trial.name} · {trial.place}</button><b>{quality.score}/100{!quality.measured ? ' · estimada' : ''}</b><div className="quality-indicator-chips"><span>Daninhas: {field?.details?.daninhas ? field.details.daninhas + '/5' : 'não avaliado'}</span><span>Doenças: {field?.details?.doencas ? field.details.doencas + '/5' : 'não avaliado'}</span><span>Falhas de implantação: {trial.affectedPlots?.length ?? 0} parcelas</span><span>Parcelas perdidas: {trial.lostPlots?.length ?? 0}</span></div>{[...unique.values()].map((alert) => <p key={alert.id}><b>{alert.alertCategory}</b> · {alert.details?.ocorrencia || alert.notes}{alert.plotIds?.length ? ' · PlotIDs: ' + alert.plotIds.join(', ') : ''} · −{alert.qualityPenalty}%</p>)}{!unique.size && <p>{quality.measured ? 'Sem ocorrências com penalidade registradas.' : 'Sem avaliação de qualidade registrada; nota de referência.'}</p>}</article>;
   };
-  const rha1Quality = qualityByRegion('RHA_1');
-  const rha2Quality = qualityByRegion('RHA_2');
-  const totalAlerts = criticalFieldAlerts.length;
-  const phaseStatus = (locationId: string, stage: MacroStage, value: number) => {
-    if (value >= 100) return { tone: 'finished', label: 'Finalizado' };
-    if (value <= 0) return { tone: 'not-started', label: 'Não iniciado' };
-    const localIds = new Set(trialList.filter((trial) => trial.locationId === locationId).map((trial) => trial.id));
-    const matchesStage = (item: PlannedActivity) => stage === 'Semeadura'
-      ? /seme|identifica|etiqueta/i.test(`${item.activity} ${item.category}`)
-      : stage === 'Colheita'
-        ? /colhe|pré-colhe/i.test(`${item.activity} ${item.category}`)
-        : !/seme|identifica|etiqueta|colhe|pré-colhe/i.test(`${item.activity} ${item.category}`);
-    const overdue = schedule.some((item) => localIds.has(item.trialId) && matchesStage(item) && item.status !== 'Concluído' && item.start < sourceSummary.importedAt);
-    return overdue ? { tone: 'late', label: 'Em atraso' } : { tone: 'in-progress', label: 'Em andamento' };
-  };
-  const dateToIso = (value: string) => value.includes('/') ? value.split('/').reverse().join('-') : value.slice(0, 10);
-  const recentActivities = [...activities].sort((a, b) => dateToIso(b.date).localeCompare(dateToIso(a.date))).slice(0, 2).reverse();
-  const pending = schedule.filter((item) => item.status !== 'Concluído').sort((a, b) => Math.abs(daysBetween(sourceSummary.importedAt, a.start)) - Math.abs(daysBetween(sourceSummary.importedAt, b.start)));
-  const currentPlan = pending[0];
-  const nextPlans = currentPlan ? pending.filter((item) => item.id !== currentPlan.id && item.start >= currentPlan.start).sort((a, b) => a.start.localeCompare(b.start)).slice(0, 2) : [];
-  const doneState = (activity: Activity) => {
-    const actual = dateToIso(activity.date);
-    const plan = schedule.find((item) => item.id === activity.plannedId);
-    return plan && actual > plan.end ? 'late' : 'ok';
-  };
-  const doneLate = recentActivities.filter((activity) => doneState(activity) === 'late').length;
-  return <>
-    <div className="dashboard-overview">
-    <PageHead eyebrow={`${harvests.find((item) => item.id === activeHarvestId)?.name ?? 'Safra'} · visão operacional`} title="Visão geral" copy="Implantação, qualidade e atividades de campo consolidadas por região e localidade." action={<div className="harvest-switch"><label>Safra<select value={activeHarvestId} onChange={(event) => onHarvest(event.target.value)}>{harvests.map((harvest) => <option key={harvest.id} value={harvest.id}>{harvest.name}{harvest.status === 'Encerrada' ? ' · encerrada' : ''}</option>)}</select></label><div className="dashboard-register-actions"><button className="secondary-button" onClick={() => onNavigate('operacional')}>⚒ Registro operacional</button><button className="primary-button" onClick={() => onNavigate('campo')}>✓ Registro de campo</button></div></div>} />
-    <section className="dashboard-analytics">
-      <button className="dashboard-chart-card seeded-chart" onClick={() => onFilter({})}><div className="dashboard-donut" style={{ background: `conic-gradient(#2f7450 0 ${plantedPercent}%,#e4e9e2 ${plantedPercent}% 100%)` }}><span><b>{plantedPercent}%</b><small>semeados</small></span></div><div><small>IMPLANTAÇÃO DA REDE</small><h2>{totalPlanted} de {trialList.length}</h2><p>ensaios já semeados</p></div><i>↗</i></button>
-      <article className="dashboard-chart-card vcu-chart"><div className="chart-card-head"><div><small>QUALIDADE MÉDIA</small><h2>Programas por RHA</h2></div><span>0–100</span></div><div className="vcu-bars">{programs.filter((program) => locations.some((location) => rhaCode(location.rha || location.region) === program.id)).map((program) => <label key={program.id}><span><b>{program.name} · {program.program}</b><em>{qualityByRegion(program.id)}</em></span><i><u style={{ width: `${qualityByRegion(program.id)}%` }} /></i></label>)}</div></article>
-      <button className="dashboard-chart-card alert-chart" aria-expanded={alertsOpen} onClick={() => setAlertsOpen(!alertsOpen)}><span className={totalAlerts ? 'alert-orb active' : 'alert-orb'} aria-hidden="true">🔔</span><div><small>NOTIFICAÇÕES GRAVES</small><h2>{totalAlerts}</h2><p><b>{new Set(criticalFieldAlerts.map((alert) => alert.locationId)).size}</b> localidades exigem conferência imediata</p></div><i>{alertsOpen ? '↑' : '↓'}</i></button>
-    </section>
-    {alertsOpen && <section className="card critical-alert-center"><div className="card-head"><div><span className="eyebrow">CENTRAL DE OCORRÊNCIAS</span><h2>Problemas graves em campo</h2><p>Somente erros operacionais que exigem conferência aparecem neste painel.</p></div><button className="text-button" onClick={() => setAlertsOpen(false)}>Fechar ×</button></div><div className="critical-alert-list">{criticalFieldAlerts.map((alert) => { const location = locations.find((item) => item.id === alert.locationId); return <button key={alert.id} onClick={() => onFilter({ locationId: alert.locationId })}><span className="critical-alert-icon">!</span><span><small>{alert.level} · {alert.time}</small><b>{alert.type}</b><p>{alert.detail}</p></span><span className="critical-alert-location"><small>LOCALIDADE</small><b>◎ {location?.name}</b><em>Ver ensaios →</em></span></button>; })}</div></section>}
-    <section className="card dashboard-map-card">
-      <div className="card-head"><div><h2>Localidades com ensaios em condução</h2><p>Visualização por satélite com implantação, estádio, qualidade e ocorrências graves por local.</p></div><button className="text-button" onClick={() => onNavigate('mapa')}>Abrir mapa completo →</button></div>
-      <NetworkMap locations={qualityLocations} compact onSelect={(locationId) => onFilter({ locationId })} />
-      <div className="map-legend quality-legend"><span><i className="excellent" />Excelente</span><span><i className="adequate" />Adequado</span><span><i className="attention" />Atenção</span><span><i className="critical" />Crítico</span><small>Passe o mouse para ver o resumo da área</small></div>
-    </section>
-    <section className="card locality-progress-card">
-      <div className="card-head"><div><h2>Andamento por localidade</h2><p>Situação de cada etapa operacional e condição atual dos ensaios.</p></div><div className="phase-legend"><span><i className="not-started" />Não iniciado</span><span><i className="finished" />Finalizado</span><span><i className="in-progress" />Em andamento</span><span><i className="late" />Em atraso</span></div></div>
-      <div className="locality-progress-table"><div className="locality-progress-head"><span>Localidade</span><span>Semeadura</span><span>Condução</span><span>Colheita</span><span>Estádio previsto</span><span>Qualidade</span><span>Alertas</span></div>{localityStages.map((item) => { const alerts = alertCountFor(item.location.id); const phases = ([['Semeadura',item.sowing],['Condução',item.conduction],['Colheita',item.harvest]] as const).map(([stage,value]) => ({ value, ...phaseStatus(item.location.id, stage, value) })); return <button key={item.location.id} onClick={() => onFilter({ locationId: item.location.id })}><span className="locality-name"><i className={item.tone} /><span><b>{item.location.name}</b><small>{item.localTrials.length} ensaios · {rhaLabel(item.location.rha || item.location.region)}</small></span></span>{phases.map((phase,index) => <span className={`phase-cell ${phase.tone}`} key={index}><i /><span><b>{phase.label}</b><small>{phase.value}%</small></span></span>)}<span className="stage-chip">{item.stage}</span><span className={`quality-cell ${item.tone}`}><b>{item.quality}</b><small>{item.tone === 'excellent' ? 'Excelente' : item.tone === 'adequate' ? 'Adequado' : item.tone === 'attention' ? 'Atenção' : 'Crítico'}</small></span><span className={alerts ? 'alert-cell active' : 'alert-cell'}>{alerts ? `! ${alerts}` : '✓ 0'}</span></button>; })}</div>
-    </section>
-    <section className="card operations-timeline-card"><div className="card-head"><div><h2>Linha do tempo das avaliações</h2><p>Duas últimas atividades, atividade atual mais próxima e as duas seguintes.</p></div><button className="text-button" onClick={() => onNavigate('planejamento')}>Ver calendário →</button></div><div className="timeline-status-summary"><span className={totalAlerts ? 'warning' : 'success'}><i>{totalAlerts ? '!' : '✓'}</i><b>{totalAlerts ? `${totalAlerts} alertas ativos` : 'Nenhum alerta ativo'}</b></span><span><i>✓</i><b>{recentActivities.length - doneLate} realizadas em dia</b></span><span className={doneLate ? 'warning' : ''}><i>↺</i><b>{doneLate} realizadas com atraso</b></span></div><div className="operations-timeline">
-      {recentActivities.map((activity) => { const state = doneState(activity); const trial = trialList.find((item) => item.id === activity.trial); return <article className="timeline-event past" key={`done-${activity.id}`}><span className="timeline-point">✓</span><small>ÚLTIMA REALIZADA</small><time>{activity.date}</time><h3>{activity.macroStage ?? activity.type}</h3><p>{activity.locationId ? locations.find((location) => location.id === activity.locationId)?.name : trial?.place ?? activity.trial}</p><em className={`timeline-status ${state}`}>{state === 'late' ? 'Realizada com atraso' : 'Realizada em dia'}</em></article>; })}
-      {currentPlan && <TimelinePlan item={currentPlan} label="ATUAL MAIS PRÓXIMA" trialList={trialList} onTrial={onTrial} />}
-      {nextPlans.map((item, index) => <TimelinePlan key={item.id} item={item} label={`PRÓXIMA ${index + 1}`} trialList={trialList} onTrial={onTrial} />)}
-    </div></section>
-    </div>
-  </>;
+  return <div className="macro-dashboard"><PageHead eyebrow="Síntese da rede" title="Visão geral" copy="Implantação, condução, colheita, cumprimento das atividades e condição experimental dos locais." action={<label>Safra<select value={activeHarvestId} onChange={(event) => onHarvest(event.target.value)}>{harvests.map((harvest) => <option value={harvest.id} key={harvest.id}>{harvest.name}</option>)}</select></label>} />
+    <section className="macro-kpis"><article className="card"><small>ENSAIOS SEMEADOS</small><strong>{plantedPercent}%</strong><p>{planted.length} de {trialList.length} implantados</p></article><article className="card"><small>PRÓXIMA COLHEITA PREVISTA</small><strong>{daysToHarvest === undefined ? '—' : Math.max(0, daysToHarvest) + ' dias'}</strong><p>{nearest ? formatDate(nearest) + (daysToHarvest! < 0 ? ' · previsão vencida' : '') : 'Aguardando semeadura registrada'}</p></article><button className="card macro-quality-button" onClick={() => setQualityOpen(!qualityOpen)} aria-expanded={qualityOpen}><small>QUALIDADE MÉDIA DOS ENSAIOS</small><strong>{trialList.length ? qualityAverage : '—'}<em>/100</em></strong><p>Ver indicadores e fatores de impacto ↓</p></button></section>
+    <section className="card macro-activity-summary"><span><b>{conducting.length}</b> ensaios em condução</span><span><b>{harvestedCount}</b> colhidos</span><span><b>{completed.length - completedLate}</b> atividades realizadas em dia</span><span><b>{completedLate}</b> realizadas com atraso</span><span><b>{overdue}</b> atividades pendentes em atraso</span></section>
+    {qualityOpen && <section className="card macro-quality-detail"><h2>O que impactou a qualidade dos ensaios</h2>{trialList.length ? trialList.map(qualityDetail) : <p>Nenhum ensaio cadastrado neste programa.</p>}</section>}
+    <section className="card macro-localities"><div className="card-head"><div><h2>Andamento e condição por localidade</h2><p>Ordenado por qualidade experimental. Abra um local para conferir implantação, colheita e erros dos ensaios.</p></div></div><div className="table-wrap"><table><thead><tr><th>Local / qualidade</th><th>Semeadura</th><th>Condução até a colheita</th><th>Colheita</th><th>Estádio previsto</th><th>Ocorrências</th></tr></thead><tbody>{ranked.map(({ location, overview }, index) => {
+      const local = overview.localTrials;
+      const localPlanted = local.filter((trial) => actualSowingDate(trial, activities, schedule));
+      const progress = localPlanted.length ? Math.round(localPlanted.reduce((sum, trial) => { const sowing = actualSowingDate(trial, activities, schedule)!; return sum + Math.min(100, Math.max(0, daysBetween(sowing, today) / Math.max(1, daysBetween(sowing, trial.harvest)) * 100)); }, 0) / localPlanted.length) : 0;
+      const harvestPercent = local.length ? Math.round(local.filter(harvested).length / local.length * 100) : 0;
+      const errors = activities.filter((activity) => Boolean(activity.alertCategory) && local.some((trial) => applies(activity, trial)));
+      const dates = localPlanted.map((trial) => actualSowingDate(trial, activities, schedule)!).sort();
+      return <tr key={location.id}><td><details><summary><b>#{index + 1} {location.name}</b><small>{overview.quality}/100 · {rhaLabel(location.rha || location.region)} · Programa {locationProgram(location)}</small></summary><div className="local-quality-expanded">{local.map(qualityDetail)}</div></details></td><td><MacroProgress value={overview.plantedPercent} /><small>{dates.length ? dates[0] === dates.at(-1) ? formatDate(dates[0]) : formatDate(dates[0]) + ' a ' + formatDate(dates.at(-1)!) : 'Não iniciada'}</small></td><td><MacroProgress value={progress} /><small>{localPlanted.length ? progress >= 100 ? 'Janela prevista de colheita atingida' : 'Progresso do ciclo previsto' : 'Aguardando semeadura'}</small></td><td><MacroProgress value={harvestPercent} /><small>{local.map((trial) => trial.harvest).sort()[0] ? 'Prevista: ' + formatDate(local.map((trial) => trial.harvest).sort()[0]) : 'Sem previsão'}</small></td><td>{overview.stage}</td><td><b>{errors.length}</b> reportes<small>{local.reduce((sum, trial) => sum + (trial.affectedPlots?.length ?? 0), 0)} parcelas com falhas</small></td></tr>;
+    })}</tbody></table></div>{!ranked.length && <p>Nenhum local com ensaios neste programa.</p>}</section>
+  </div>;
 }
-
-function TimelinePlan({ item, label, trialList, onTrial }: { item: PlannedActivity; label: string; trialList: Trial[]; onTrial: (trial: Trial) => void }) {
-  const trial = trialList.find((entry) => entry.id === item.trialId);
-  const late = item.start < sourceSummary.importedAt;
-  return <button className={`timeline-event ${late ? 'late' : 'next'}`} onClick={() => trial && onTrial(trial)}><span className="timeline-point">{late ? '!' : '○'}</span><small>{label}</small><time>{formatDate(item.start)}</time><h3>{item.activity}</h3><p>{trial?.place ?? item.trialId} · {trial ? macroGroupFor(trial) : 'Ensaios'}</p><em className={`timeline-status ${late ? 'late' : 'planned'}`}>{late ? 'Alerta de atraso' : 'Programada'}</em></button>;
-}
-
 function MacroProgress({ value }: { value: number }) {
   return <span className="macro-progress"><span><i style={{ width: `${value}%` }} /></span><b>{value}%</b></span>;
 }
@@ -1040,14 +1024,15 @@ function WeatherWeekCalendar({ weather, compact = false }: { weather: LocationWe
 
 function WeatherScreen({ weatherConditions, weatherChecking, weatherCheckedAt, onRefresh }: { weatherConditions: LocationWeather[]; weatherChecking: boolean; weatherCheckedAt: string; onRefresh: () => void }) {
   const locations = useContext(ProgramLocations) ?? baseLocations;
+  const [selected, setSelected] = useState('');
   const [historyLimit, setHistoryLimit] = useState(10);
-  const [selected, setSelected] = useState(locations[0]?.id ?? '');
-  const current = weatherConditions.find((weather) => weather.locationId === selected) ?? weatherConditions[0];
-  const displayLocations: NetworkLocation[] = locations.map((location) => ({ ...location, qualityTone: 'neutral', weather: weatherConditions.find((weather) => weather.locationId === location.id) }));
-  return <><PageHead eyebrow="Meteorologia por local" title="Condições climáticas" copy="Condição atual, previsão semanal e histórico desde a semeadura operacional, comparando ECMWF/IFS, NOAA/GFS e DWD/ICON." action={<button className="primary-button" type="button" disabled={weatherChecking} onClick={onRefresh}>{weatherChecking ? 'Consultando as plataformas…' : 'Atualizar condições'}</button>} />
-    {weatherCheckedAt && <div className="weather-updated">Última atualização: {new Date(weatherCheckedAt).toLocaleString('pt-BR')}</div>}
-    <section className="weather-map-layout"><div className="card weather-map-card"><NetworkMap locations={displayLocations} onSelect={setSelected} /></div><aside className="card weather-detail-panel">{current ? <><div className="weather-location-title"><span>{weatherSymbol(current.condition)}</span><div><small>LOCAL SELECIONADO</small><h2>{current.locationName}</h2><p>{current.temperature.toFixed(1)}°C · {current.condition}</p></div></div><div className="weather-source-list">{current.sources.map((source) => <article className={!source.available ? 'unavailable' : ''} key={source.id}><header><b>{source.name}</b><span>{source.available ? weatherSymbol(source.condition) : '—'}</span></header>{source.available ? <><strong>{source.temperature.toFixed(1)}°C</strong><p>{source.condition}</p><div><small>Chuva <b>{source.precipitation.toFixed(1)} mm</b></small><small>Umidade <b>{source.humidity}%</b></small><small>Rajada <b>{source.gust} km/h</b></small></div></> : <p>Plataforma temporariamente indisponível.</p>}</article>)}</div><WeatherWeekCalendar weather={current} /><section className="weather-history-report"><header><div><small>RELATÓRIO POR LOCALIDADE</small><h3>Histórico desde a semeadura</h3></div>{current.sowingDate && <time>{formatDate(current.sowingDate)} até hoje</time>}</header>{current.sowingDate ? <><div className="weather-history-total"><span>💧</span><div><strong>{(current.accumulatedPrecipitation ?? 0).toFixed(1)} mm</strong><small>precipitação acumulada · média das fontes disponíveis</small></div></div><div className="weather-history-sources">{(current.historySources ?? []).map((source) => <article className={!source.available ? 'unavailable' : ''} key={source.id}><b>{source.name}</b>{source.available ? <><strong>{source.accumulatedPrecipitation.toFixed(1)} mm</strong><small>{source.stormDays} dia(s) com tempestade · {source.hailDays} com granizo</small></> : <small>Histórico indisponível</small>}</article>)}</div><div className="weather-event-list"><h4>Histórico · 10 ocorrências recentes por página</h4>{(current.events ?? []).length ? (current.events ?? []).slice(0, historyLimit).map((event) => <article className={event.type === 'Granizo' ? 'hail' : 'storm'} key={event.date}><span>{event.type === 'Granizo' ? '◆' : '⚡'}</span><div><b>{event.type} · {formatDate(event.date)}</b><small>{event.sources.join(', ')} · chuva máx. {event.precipitation.toFixed(1)} mm · rajada máx. {event.gust} km/h</small></div></article>) : <p>Nenhuma tempestade ou ocorrência de granizo foi indicada pelos modelos no período.</p>}{(current.events ?? []).length > historyLimit && <button className="secondary-button" onClick={() => setHistoryLimit((limit) => limit + 10)}>Carregar mais 10 ocorrências</button>}</div></> : <div className="weather-awaiting-sowing"><span>🌱</span><div><b>Aguardando semeadura operacional</b><p>O acumulado e os alertas históricos começam após o registro operacional de semeadura deste local.</p></div></div>}</section></> : <div className="empty-weather"><span>☁</span><h2>Dados ainda não consultados</h2><p>Atualize as condições para visualizar as três plataformas em todos os locais cadastrados.</p></div>}</aside></section>
-    <section className="weather-location-grid">{weatherConditions.map((weather) => <button className={weather.locationId === current?.locationId ? 'card active' : 'card'} key={weather.locationId} onClick={() => setSelected(weather.locationId)}><span>{weatherSymbol(weather.condition)}</span><div><small>{weather.locationName}</small><b>{weather.temperature.toFixed(1)}°C</b><p>{weather.condition}</p></div><em>{weather.sources.filter((source) => source.available).length}/3 fontes</em></button>)}</section>
+  const current = weatherConditions.find((weather) => weather.locationId === selected);
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' });
+  const dates = Array.from({ length: 7 }, (_, index) => addDays(today, index));
+  return <><PageHead eyebrow="Previsão por local" title="Condições climáticas" copy="Consulte a condição e a precipitação prevista nos próximos sete dias. Clique no local para abrir o histórico desde a semeadura." action={<button className="primary-button" onClick={onRefresh} disabled={weatherChecking}>{weatherChecking ? 'Atualizando…' : 'Atualizar previsão'}</button>} />
+    {weatherCheckedAt && <p>Atualizado em {new Date(weatherCheckedAt).toLocaleString('pt-BR')}</p>}
+    <section className="card climate-sheet"><div className="table-wrap"><table><thead><tr><th>Localidade</th>{dates.map((date) => <th key={date}>{new Date(date + 'T12:00:00').toLocaleDateString('pt-BR', { weekday: 'short', day: '2-digit', month: '2-digit' })}</th>)}</tr></thead><tbody>{locations.map((location) => { const weather = weatherConditions.find((item) => item.locationId === location.id); return <tr key={location.id}><th><button className={selected === location.id ? 'active' : ''} onClick={() => { setSelected(location.id); setHistoryLimit(10); }}>{location.name}</button><small>{rhaLabel(location.rha || location.region)}</small></th>{dates.map((date) => { const day = weather?.week?.find((item) => item.date === date); return <td key={date}>{day ? <><span>{weatherSymbol(day.condition)} {day.condition}</span><b>{day.precipitation.toFixed(1)} mm</b><small>{day.temperatureMin}° / {day.temperatureMax}°C</small></> : <span>Sem previsão disponível</span>}</td>; })}</tr>; })}</tbody></table></div>{!locations.length && <p>Nenhum local cadastrado neste programa.</p>}</section>
+    {current && <section className="card climate-history"><h2>{current.locationName} · histórico climático</h2><WeatherWeekCalendar weather={current} />{current.sowingDate ? <><p>Desde {formatDate(current.sowingDate)} · {(current.accumulatedPrecipitation ?? 0).toFixed(1)} mm acumulados na média das fontes disponíveis</p><div className="weather-history-sources">{(current.historySources ?? []).map((source) => <article key={source.id}><b>{source.name}</b><strong>{source.available ? source.accumulatedPrecipitation.toFixed(1) + ' mm' : 'Indisponível'}</strong><small>{source.stormDays} dias com tempestade · {source.hailDays} com granizo</small></article>)}</div><div className="weather-event-list">{(current.events ?? []).slice(0, historyLimit).map((event) => <article key={event.date}><b>{formatDate(event.date)} · {event.type}</b><p>{event.sources.join(', ')} · {event.precipitation.toFixed(1)} mm · rajada {event.gust} km/h</p></article>)}{!(current.events ?? []).length && <p>Nenhuma tempestade ou granizo indicado no período consultado.</p>}{(current.events ?? []).length > historyLimit && <button className="secondary-button" onClick={() => setHistoryLimit((limit) => limit + 10)}>Carregar mais 10</button>}</div></> : <p>Aguardando registro operacional de semeadura para iniciar o histórico.</p>}</section>}
   </>;
 }
 
@@ -1366,7 +1351,7 @@ function AdminRegistrationScreen({ registeredTrials, trialList, activities, sche
     const workbook = new Workbook();
     const worksheet = workbook.addWorksheet('Gestão da Safra', { views: [{ state: 'frozen', ySplit: 3, xSplit: 2 }] });
     const dynamicHeaders = dynamicFields.map((field) => `variavel_${field.id}`);
-    const headers = ['local_codigo','local_nome','municipio','uf','latitude','longitude','tipo_area','mapa_id','mapa_nome','arquivo_croqui','codigo_alocacao','cor_ensaio','campo_codigo','campo_nome','ensaio_codigo','ensaio_nome','grupo','subtipo_ensaio','parcela_inicial','parcela_final','primeira_parcela_latitude','primeira_parcela_longitude','parcelas','parcelas_com_alerta','parcelas_perdidas','penalidade_implantacao','data_semeadura_prevista','data_semeadura','visita_codigo','atividade_descricao','estadio_fenologico','data_prevista','responsavel','prioridade','status_planejamento','data_realizada','checklist_concluido','estabelecimento_nota','uniformidade_nota','daninhas_nota','controle_daninhas','oidio_nota','ferrugem_nota','manchas_nota','observacoes','fotos','nota_qualidade','classificacao','alerta_categoria','alerta_abrangencia','alerta_descricao','alerta_plotid','desconto_qualidade_pct', ...dynamicHeaders];
+    const headers = ['programa','local_codigo','local_nome','municipio','uf','latitude','longitude','tipo_area','mapa_id','mapa_nome','arquivo_croqui','codigo_alocacao','cor_ensaio','campo_codigo','campo_nome','ensaio_codigo','ensaio_nome','grupo','subtipo_ensaio','parcela_inicial','parcela_final','primeira_parcela_latitude','primeira_parcela_longitude','parcelas','parcelas_com_alerta','parcelas_perdidas','penalidade_implantacao','data_semeadura_prevista','data_semeadura','visita_codigo','atividade_descricao','estadio_fenologico','data_prevista','responsavel','prioridade','status_planejamento','data_realizada','checklist_concluido','estabelecimento_nota','uniformidade_nota','daninhas_nota','controle_daninhas','oidio_nota','ferrugem_nota','manchas_nota','observacoes','fotos','nota_qualidade','classificacao','alerta_categoria','alerta_abrangencia','alerta_descricao','alerta_plotid','desconto_qualidade_pct', ...dynamicHeaders];
     worksheet.mergeCells(1, 1, 1, headers.length); worksheet.getCell('A1').value = 'FIELD WHEAT TESTING — BASE DE GESTÃO GERADA PELOS CROQUIS';
     worksheet.mergeCells(2, 1, 2, headers.length); worksheet.getCell('A2').value = 'POSICIONAMENTO, ENSAIOS, CALENDÁRIO E REGISTROS DE CAMPO';
     worksheet.addRow(headers);
@@ -1380,7 +1365,7 @@ function AdminRegistrationScreen({ registeredTrials, trialList, activities, sche
       const applicableAlerts = activities.filter((activity) => Number(activity.qualityPenalty ?? 0) > 0 && trial && (activity.trial === trial.id || (activity.locationId === trial.locationId && (activity.scope === 'Local inteiro' || activity.scope === 'Tipo de ensaio' && activity.macroGroup === macroGroupFor(trial)))));
       const original = sourceByVisit.get(plan.id) ?? {};
       const activityDate = record?.date?.includes('/') ? record.date.split('/').reverse().join('-') : record?.date ?? '';
-      const values: Record<string, unknown> = { ...original, local_codigo: location?.id, local_nome: location?.name, municipio: String(original.municipio ?? location?.city?.split(' - ')[0] ?? ''), uf: String(original.uf ?? location?.city?.split(' - ')[1] ?? ''), latitude: location?.lat, longitude: location?.lng, vcu_regiao: String(original.vcu_regiao ?? location?.region ?? '').replace('_1',' I').replace('_2',' II').replace('_3',' III'), tipo_area: trial?.areaCategory ?? original.tipo_area, mapa_id: trial?.mapId ?? original.mapa_id, mapa_nome: original.mapa_nome, cor_ensaio: original.cor_ensaio, campo_nome: trial?.fieldName, ensaio_codigo: trial?.id, ensaio_nome: trial?.name, grupo: trial?.type, subtipo_ensaio: trial?.subtype, parcelas: trial?.plots, parcelas_com_alerta: trial?.affectedPlots?.join('; '), parcelas_perdidas: trial?.lostPlots?.join('; '), penalidade_implantacao: trial?.layoutPenalty, data_semeadura: trial?.sowing, visita_codigo: plan.id, atividade_descricao: plan.activity, estadio_fenologico: plan.category, data_prevista: plan.start, responsavel: plan.owner, prioridade: plan.priority, status_planejamento: record ? 'Finalizado' : plan.status, data_realizada: activityDate, checklist_concluido: record?.checks?.join('; '), estabelecimento_nota: record?.details?.estabelecimento, uniformidade_nota: record?.details?.uniformidade, daninhas_nota: record?.details?.daninhas, controle_daninhas: record?.details?.controle_daninhas, oidio_nota: record?.details?.oidio, ferrugem_nota: record?.details?.ferrugem, manchas_nota: record?.details?.manchas, observacoes: record?.notes ?? plan.notes, fotos: record?.photos?.join('; '), nota_qualidade: trial ? trialQuality(trial, activities).score : record?.qualityScore, classificacao: trial ? trialQuality(trial, activities).label : record?.qualityClass, alerta_categoria: applicableAlerts.map((item) => item.alertCategory).join('; '), alerta_abrangencia: applicableAlerts.map((item) => item.scope).join('; '), alerta_descricao: applicableAlerts.map((item) => item.details?.ocorrencia || item.notes).join(' | '), alerta_plotid: applicableAlerts.flatMap((item) => item.plotIds ?? []).join('; '), desconto_qualidade_pct: applicableAlerts.reduce((sum, item) => sum + Number(item.qualityPenalty ?? 0), 0) };
+      const values: Record<string, unknown> = { ...original, programa: location ? locationProgram(location) : original.programa, local_codigo: location?.id, local_nome: location?.name, municipio: String(original.municipio ?? location?.city?.split(' - ')[0] ?? ''), uf: String(original.uf ?? location?.city?.split(' - ')[1] ?? ''), latitude: location?.lat, longitude: location?.lng, vcu_regiao: String(original.vcu_regiao ?? location?.region ?? '').replace('_1',' I').replace('_2',' II').replace('_3',' III'), tipo_area: trial?.areaCategory ?? original.tipo_area, mapa_id: trial?.mapId ?? original.mapa_id, mapa_nome: original.mapa_nome, cor_ensaio: original.cor_ensaio, campo_nome: trial?.fieldName, ensaio_codigo: trial?.id, ensaio_nome: trial?.name, grupo: trial?.type, subtipo_ensaio: trial?.subtype, parcelas: trial?.plots, parcelas_com_alerta: trial?.affectedPlots?.join('; '), parcelas_perdidas: trial?.lostPlots?.join('; '), penalidade_implantacao: trial?.layoutPenalty, data_semeadura: trial?.sowing, visita_codigo: plan.id, atividade_descricao: plan.activity, estadio_fenologico: plan.category, data_prevista: plan.start, responsavel: plan.owner, prioridade: plan.priority, status_planejamento: record ? 'Finalizado' : plan.status, data_realizada: activityDate, checklist_concluido: record?.checks?.join('; '), estabelecimento_nota: record?.details?.estabelecimento, uniformidade_nota: record?.details?.uniformidade, daninhas_nota: record?.details?.daninhas, controle_daninhas: record?.details?.controle_daninhas, oidio_nota: record?.details?.oidio, ferrugem_nota: record?.details?.ferrugem, manchas_nota: record?.details?.manchas, observacoes: record?.notes ?? plan.notes, fotos: record?.photos?.join('; '), nota_qualidade: trial ? trialQuality(trial, activities).score : record?.qualityScore, classificacao: trial ? trialQuality(trial, activities).label : record?.qualityClass, alerta_categoria: applicableAlerts.map((item) => item.alertCategory).join('; '), alerta_abrangencia: applicableAlerts.map((item) => item.scope).join('; '), alerta_descricao: applicableAlerts.map((item) => item.details?.ocorrencia || item.notes).join(' | '), alerta_plotid: applicableAlerts.flatMap((item) => item.plotIds ?? []).join('; '), desconto_qualidade_pct: applicableAlerts.reduce((sum, item) => sum + Number(item.qualityPenalty ?? 0), 0) };
       dynamicFields.forEach((field) => { values[`variavel_${field.id}`] = record?.details?.[field.id] ?? ''; });
       worksheet.addRow(headers.map((header) => values[header] ?? ''));
     });
@@ -1473,41 +1458,6 @@ function CatalogManagementPanel({ locationsList, locked, selected, onToggle, onL
 
 function HarvestManagementPanel({ harvests, activeId, clonePlanning, onClone, onCreate, onSelect, onStatus }: { harvests: Harvest[]; activeId: string; clonePlanning: boolean; onClone: (value: boolean) => void; onCreate: (event: FormEvent<HTMLFormElement>) => void; onSelect: (id: string) => void; onStatus: (id: string, status: HarvestStatus) => void }) {
   return <section className="harvest-management"><form className="card new-harvest-card" onSubmit={onCreate}><span className="eyebrow">NOVA SAFRA</span><h2>Criar ciclo operacional</h2><label>Nome da safra<input name="harvestName" required placeholder="Safra 2027" /></label><label className="clone-option"><input type="checkbox" checked={clonePlanning} onChange={(event) => onClone(event.target.checked)} /><span><b>Copiar o planejamento da safra atual</b><small>Locais, ensaios e visitas são reaproveitados; registros e notas começam vazios.</small></span></label><button className="primary-button">Confirmar e criar safra</button></form><section className="card harvest-history"><div className="card-head"><div><h2>Histórico de safras</h2><p>Consulte qualidade e situação de cada ciclo.</p></div></div>{harvests.map((harvest) => <article key={harvest.id} className={harvest.id === activeId ? 'active' : ''}><button type="button" onClick={() => onSelect(harvest.id)}><span><b>{harvest.name}</b><small>{harvest.updatedAt ? `Atualizada em ${new Date(harvest.updatedAt).toLocaleDateString('pt-BR')}` : 'Sem atualização'}</small></span><strong>{harvest.quality}/100</strong><em>{harvest.status}</em></button>{harvest.id === activeId && <button className="secondary-button" type="button" onClick={() => onStatus(harvest.id, harvest.status === 'Ativa' ? 'Encerrada' : 'Ativa')}>{harvest.status === 'Ativa' ? 'Encerrar e bloquear registros' : 'Reabrir como administrador'}</button>}</article>)}</section></section>;
-}
-
-function ResultsSummary({ trialList, activities, schedule }: { trialList: Trial[]; activities: Activity[]; schedule: PlannedActivity[] }) {
-  const locations = useContext(ProgramLocations) ?? baseLocations;
-  const ranking = locations.map((location) => {
-    const overview = localityOverview(location.id, trialList, activities, schedule);
-    const errors = activities.filter((activity) => (activity.locationId === location.id || overview.localTrials.some((trial) => trial.id === activity.trial)) && Boolean(activity.alertCategory));
-    return { location, overview, errors };
-  }).filter((item) => item.overview.localTrials.length).sort((a, b) => b.overview.quality - a.overview.quality);
-  const stages = ['Pré-semeadura','Emergência','Perfilhamento','Alongamento','Espigamento','Enchimento de grãos','Maturação'];
-  const rhaProgress = ['RHA_1','RHA_2','RHA_3'].filter((rha) => locations.some((location) => rhaCode(location.rha || location.region) === rha)).map((rha) => {
-    const localIds = new Set(locations.filter((location) => rhaCode(location.rha || location.region) === rha).map((location) => location.id));
-    const fields = trialList.filter((trial) => localIds.has(trial.locationId));
-    const counts = stages.map((stage) => ({ stage, count: fields.filter((trial) => { const sowing = actualSowingDate(trial, activities, schedule); return (sowing ? phenologicalStage(trial, sowing) : 'Pré-semeadura') === stage; }).length }));
-    return { rha, total: fields.length, counts };
-  });
-  const trialsWithActivity = new Set(activities.map((activity) => activity.trial)).size;
-  const completed = schedule.filter((item) => item.status === 'Concluído').length;
-  const coverage = schedule.length ? Math.round((completed / schedule.length) * 100) : 0;
-  const scored = activities.filter((activity) => typeof activity.qualityScore === 'number');
-  const averageQuality = scored.length ? Math.round(scored.reduce((sum, activity) => sum + (activity.qualityScore ?? 0), 0) / scored.length) : 0;
-  const regions = [...new Set(locations.map((location) => location.region))];
-  const regionProgress = regions.map((region) => {
-    const locationIds = new Set<string>(locations.filter((location) => location.region === region).map((location) => location.id));
-    const regionTrials = trialList.filter((trial) => locationIds.has(trial.locationId));
-    const average = regionTrials.length ? Math.round(regionTrials.reduce((sum, trial) => sum + trial.progress, 0) / regionTrials.length) : 0;
-    return { name: region, value: average };
-  });
-  return <><div className="card-head"><div><h2>Síntese de resultados</h2><p>Progresso fenológico, qualidade experimental e ocorrências do contexto selecionado.</p></div></div>
-    <section className="result-hero"><div><span className="eyebrow">CONTROLE DA SAFRA</span><h2>{trialsWithActivity} ensaios registrados · qualidade média {averageQuality}/100.</h2><p>{completed} de {schedule.length} atividades do calendário foram concluídas.</p></div><div className="donut" style={{ background: `radial-gradient(circle,#315d46 56%,transparent 57%), conic-gradient(var(--lime) ${coverage}%, rgba(255,255,255,.14) 0)` }}><b>{coverage}%</b><span>executado</span></div></section>
-    <section className="rha-stage-grid">{rhaProgress.map(({ rha, total, counts }) => <article className="card" key={rha}><h2>{rhaLabel(rha)} · estádios dos ensaios</h2><p>{total} ensaios · estimativa pela semeadura realizada</p>{counts.map(({ stage, count }) => <div className="stage-distribution" key={stage}><span>{stage}</span><div><i style={{ width: `${total ? count / total * 100 : 0}%` }} /></div><b>{count}</b></div>)}</article>)}</section>
-    <section className="card quality-ranking"><h2>Ranking de locais por qualidade experimental</h2><p>Abra um local para conferir a descrição dos erros e os PlotIDs afetados.</p>{ranking.map(({ location, overview, errors }, index) => <details key={location.id}><summary><strong>#{index + 1} {location.name}</strong><span>{rhaLabel(location.rha || location.region)} · {overview.stage}</span><b>{overview.quality}/100</b><span>{errors.length} ocorrências · {overview.localTrials.reduce((sum, trial) => sum + (trial.affectedPlots?.length ?? 0), 0)} parcelas com erro</span></summary><div>{errors.map((error) => <article key={error.id}><b>{error.alertCategory} · {error.date}</b><p>{error.details?.ocorrencia || error.notes}</p><small>{trialList.find((trial) => trial.id === error.trial)?.name ?? error.trial} · PlotIDs: {error.plotIds?.join(', ') || 'Não informados'}</small></article>)}{overview.localTrials.filter((trial) => trial.affectedPlots?.length && !errors.some((error) => error.trial === trial.id)).map((trial) => <article key={trial.id}><b>{trial.name} · ocorrência no croqui</b><p>Parcelas afetadas: {trial.affectedPlots?.join(', ')}</p><small>Parcelas perdidas: {trial.lostPlots?.join(', ') || 'Nenhuma'}</small></article>)}{!errors.length && !overview.localTrials.some((trial) => trial.affectedPlots?.length) && <p>Nenhum erro registrado para este local.</p>}</div></details>)}</section>
-
-    <section className="card quality-table"><div className="card-head"><div><h2>Classificação dos campos</h2><p>Últimos registros com valorização e depreciação ponderadas.</p></div></div><div className="table-wrap"><table><thead><tr><th>Ensaio</th><th>Atividade</th><th>Data</th><th>Nota</th><th>Classificação</th></tr></thead><tbody>{scored.slice(0, 8).map((activity) => { const trial = trialList.find((item) => item.id === activity.trial); const adjusted = trial ? trialQuality(trial, activities).score : activity.qualityScore; return <tr key={activity.id}><td><b>{trial?.name ?? activity.trial}</b>{trial?.lostPlots?.length ? <small className="lost-plots">{trial.lostPlots.length} perdida(s): {trial.lostPlots.join(', ')}</small> : null}</td><td>{activity.type}</td><td>{activity.date}</td><td><b>{adjusted}/100</b></td><td><Status kind={(adjusted ?? 0) >= 70 ? 'ok' : (adjusted ?? 0) >= 50 ? 'attention' : 'late'}>{adjusted && adjusted >= 85 ? 'Excelente' : adjusted && adjusted >= 70 ? 'Adequado' : adjusted && adjusted >= 50 ? 'Atenção' : 'Crítico'}</Status></td></tr>; })}</tbody></table></div></section>
-  </>;
 }
 
 function UsersScreen() {

@@ -10,6 +10,7 @@ export type NetworkLocation = {
   city: string;
   region: string;
   rha?: string;
+  program?: 'U' | 'K' | 'X';
   lat: number;
   lng: number;
   trials: number;
