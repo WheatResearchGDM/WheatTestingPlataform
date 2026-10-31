@@ -1,4 +1,4 @@
-const CACHE_NAME = 'field-wheat-testing-v3';
+const CACHE_NAME = 'field-wheat-testing-v4-mobile';
 const APP_ROOT = new URL('./', self.location.href).href;
 const SHELL = [APP_ROOT, new URL('manifest.webmanifest', APP_ROOT).href];
 

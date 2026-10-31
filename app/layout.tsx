@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from 'next';
 import './globals.css';
 import './design-system.css';
+import './mobile.css';
 
 export const metadata: Metadata = {
   metadataBase: new URL('https://wheatresearchgdm.github.io/WheatTestingPlataform/'),

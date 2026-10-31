@@ -7,6 +7,9 @@ import type { LayoutFinalization } from '../components/FieldLayoutMap';
 import { fetchWeatherConditions, type LocationWeather } from '../lib/weatherAlerts';
 import RoutePlanner from '../components/RoutePlanner';
 import { mountNavigationAssistant } from '../lib/navigation-assistant.js';
+import MobileAgenda from '../components/MobileAgenda';
+import { PhotoCapture, ActivityPhotoGallery } from '../components/ActivityPhotos';
+import { saveActivityPhotos, deleteActivityPhotos } from '../lib/activityPhotos';
 import {
   importedActivities,
   importedLocations,
@@ -25,7 +28,7 @@ type ActivityStream = 'operational' | 'field';
 type MacroGroup = 'Ensaios' | 'Coleção' | 'Founder' | 'PD' | 'Multiqualidades' | 'Outro';
 type MacroStage = 'Semeadura' | 'Condução' | 'Colheita';
 type PhenologyVisit = 'Semeadura' | 'Perfilhamento' | 'Alongamento' | 'Emborrachamento' | 'Espigamento' | 'Enchimento de grão' | 'Maturidade';
-type Activity = { id: number; date: string; trial: string; type: string; owner: string; notes: string; stream?: ActivityStream; plannedId?: string; qualityScore?: number; qualityClass?: string; locationId?: string; scope?: string; macroGroup?: MacroGroup; macroStage?: MacroStage; checks?: string[]; photos?: string[]; details?: Record<string, string>; alertCategory?: string; qualityPenalty?: number; plotIds?: string[] };
+type Activity = { id: number; date: string; trial: string; type: string; owner: string; notes: string; stream?: ActivityStream; plannedId?: string; qualityScore?: number; qualityClass?: string; locationId?: string; scope?: string; macroGroup?: MacroGroup; macroStage?: MacroStage; checks?: string[]; photos?: string[]; photoIds?: string[]; details?: Record<string, string>; alertCategory?: string; qualityPenalty?: number; plotIds?: string[] };
 type PlannedActivity = { id: string; trialId: string; locationId?: string; areaCategory?: string; activityTemplateId?: string; activity: string; category: string; start: string; end: string; owner: string; priority: string; status: string; notes: string; originalStart: string; originalEnd: string; version: number };
 type Trial = { id: string; name: string; type: string; subtype?: string; year: number; cycle: string; locationId: string; plots: number; sowing: string; harvest: string; owner: string; rawStatus: string; priority: string; notes: string; place: string; city: string; status: string; progress: number; next: string; nextDate: string; date: string; fieldName?: string; area?: number; mapId?: string; areaCategory?: string; issueCount?: number; affectedPlots?: string[]; lostPlots?: string[]; layoutPenalty?: number };
 type ViewContext = { locationId?: string; operational?: 'ok' | 'late' };
@@ -73,7 +76,7 @@ const roleScreens: Record<AppRole, Screen[]> = {
   Administrador: ['dashboard','mapa','rotas','clima','ensaios','planejamento','operacional','campo','atividade','historico','usuarios','cadastros','detalhe'],
   Gestor: ['dashboard','mapa','rotas','clima','ensaios','planejamento','operacional','campo','atividade','historico','cadastros','detalhe'],
   RA: ['dashboard','mapa','rotas','clima','ensaios','planejamento','operacional','campo','atividade','historico','cadastros','detalhe'],
-  'Técnico responsável': ['dashboard','mapa','rotas','clima','ensaios','operacional','campo','atividade','historico','detalhe'],
+  'Técnico responsável': ['dashboard','mapa','rotas','clima','ensaios','planejamento','operacional','campo','atividade','historico','detalhe'],
 };
 const totalRegions = 0;
 function dateParts(iso: string) {
@@ -281,6 +284,7 @@ const programs = [
 export default function Home() {
   const [programId, setProgramId] = useState('Brasil');
   const [phase, setPhase] = useState<'login' | 'profile' | 'app'>('login');
+  const [savingActivity, setSavingActivity] = useState(false);
   useEffect(() => {
     if (phase !== 'app') return;
     return mountNavigationAssistant();
@@ -486,8 +490,9 @@ export default function Home() {
     go('ensaios');
   }
 
-  function saveActivity(event: FormEvent<HTMLFormElement>) {
+  async function saveActivity(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (savingActivity) return;
     if (activeHarvest?.status === 'Encerrada') { setToast('Safra encerrada. Um administrador precisa reabri-la antes de registrar atividades.'); setTimeout(() => setToast(''), 4000); return; }
     const data = new FormData(event.currentTarget);
     const establishment = Number(data.get('establishment') ?? 3);
@@ -512,9 +517,16 @@ export default function Home() {
     const matchingTrial = allTrials.find((trial) => trial.id === selectedTrialId) ?? allTrials.find((trial) => trial.locationId === locationId && (trial.areaCategory === areaCategory || macroGroupFor(trial) === macroGroup)) ?? selectedTrial;
     const alertCategory = String(data.get('adverseCategory') || ''); const adverseQuantity = Number(data.get('adverseQuantity') || 1);
     const penalty = alertCategory ? adversePenalty(alertCategory, adverseQuantity, Number(data.get('manualPenalty') || 0)) : 0;
-    const photoFiles = Array.from(data.entries()).filter(([key, entry]) => (key.startsWith('checkPhoto-') || key === 'riskPhotos' || key === 'photos' || key === 'adversePhotos') && entry instanceof File && entry.size > 0).map(([, entry]) => (entry as File).name);
+    const selectedPhotos = Array.from(data.entries()).filter(([key, entry]) => (key.startsWith('checkPhoto-') || ['riskPhotos','photos','cameraPhoto','adversePhotos'].includes(key)) && entry instanceof File && entry.size > 0).map(([, entry]) => entry as File);
+    const activityId = Date.now();
+    let storedPhotoIds: string[] = [];
+    let recordCommitted = false;
+    setSavingActivity(true);
+    try {
+    storedPhotoIds = await saveActivityPhotos(activityId, selectedPhotos);
+    const photoFiles = selectedPhotos.map((file) => file.name);
     const next: Activity = {
-      id: Date.now(),
+      id: activityId,
       date: new Date(`${data.get('date')}T12:00:00`).toLocaleDateString('pt-BR'),
       trial: matchingTrial.id,
       type: String(data.get('visitStage') || macroStage),
@@ -530,14 +542,16 @@ export default function Home() {
       macroStage,
       checks: data.getAll('checks').map(String),
       photos: photoFiles,
+      photoIds: storedPhotoIds,
       alertCategory: alertCategory || undefined,
       qualityPenalty: penalty || undefined,
       plotIds: String(data.get('adversePlotIds') || '').split(/[;,\s]+/).map((item) => item.trim()).filter(Boolean),
       details: { categoria_area: areaCategory, estadio: String(data.get('visitStage') || data.get('stage') || ''), fluxo: recordStream, condicao_operacao: String(data.get('condition') || ''), enchimento_plantado: String(data.get('fillPlanted') || ''), produto: String(data.get('product') || ''), dose: String(data.get('dose') || ''), estabelecimento: String(establishment), uniformidade: String(uniformity), daninhas: String(weeds), doencas: String(disease), controle_daninhas: String(data.get('weedControl') || ''), oidio: String(data.get('oidio') || ''), ferrugem: String(data.get('ferrugem') || ''), manchas: String(data.get('manchas') || ''), ocorrencia: String(data.get('adverseDescription') || ''), quantidade_afetada: String(adverseQuantity), ...Object.fromEntries([...data.entries()].filter(([key]) => key.startsWith('dynamic-')).map(([key, value]) => [key.slice(8), String(value)])) },
     };
     const updated = [next, ...activities];
-    setActivities(updated);
     window.localStorage.setItem('field-wheat-activities-clean-v1', JSON.stringify(updated));
+    recordCommitted = true;
+    setActivities(updated);
     if (!navigator.onLine) { const queued = pendingSync + 1; localStorage.setItem('field-wheat-pending-sync-v1', String(queued)); setPendingSync(queued); }
     if (plannedId) {
       const nextSchedule = schedule.map((item) => item.id === plannedId ? { ...item, status: 'Concluído' } : item);
@@ -551,6 +565,10 @@ export default function Home() {
     setToast(recordStream === 'field' ? `Registro de campo salvo em ${locations.find((location) => location.id === locationId)?.name}. Qualidade: ${quality.label} (${quality.score}/100).` : `Registro operacional salvo em ${locations.find((location) => location.id === locationId)?.name}.`);
     go('historico');
     setTimeout(() => setToast(''), 3500);
+    } catch (error) {
+      if (!recordCommitted) await deleteActivityPhotos(storedPhotoIds).catch(() => undefined);
+      setToast(recordCommitted ? 'Registro salvo neste aparelho. Não foi possível atualizar todos os resumos; recarregue a página.' : error instanceof Error ? error.message : 'Não foi possível salvar o registro. Tente novamente.');
+    } finally { setSavingActivity(false); }
   }
 
   function openPlannedActivity(item: PlannedActivity) {
@@ -881,7 +899,7 @@ export default function Home() {
             <label>Função<select value={currentRole} onChange={(event) => setCurrentRole(event.target.value as AppRole)}><option>Administrador</option><option>Gestor</option><option>RA</option><option>Técnico responsável</option></select></label>
             <label>Locais de acesso<input defaultValue={currentUser?.locations ?? 'Todos'} /></label>
           </div>
-          <button className="primary-button wide" onClick={() => { localStorage.setItem('field-wheat-current-role-v1', currentRole); setPhase('app'); }}>Entrar na plataforma <span>→</span></button>
+          <button className="primary-button wide" onClick={() => { localStorage.setItem('field-wheat-current-role-v1', currentRole); if (window.matchMedia('(max-width: 760px)').matches) { selectProgram(locations[0] ? locationProgram(locations[0]) : 'U'); setScreen('planejamento'); } setPhase('app'); }}>Entrar na plataforma <span>→</span></button>
         </section>
       </main>
     );
@@ -903,11 +921,13 @@ export default function Home() {
             <Brand compact />
             <button className="menu-button" onClick={() => setMenuOpen(!menuOpen)} aria-label="Abrir menu">☰</button>
             <div className="search-box">⌕ <span>Buscar ensaios, locais ou atividades…</span><kbd>⌘ K</kbd></div>
-            <div className="top-actions"><span className={`sync-indicator ${online ? 'online' : 'offline'}`}><i />{online ? pendingSync ? `Sincronizando ${pendingSync}` : 'Sincronizado' : `${pendingSync} pendente(s)`}</span><button aria-label="Notificações">♢<i /></button><div className="avatar">IG</div><div className="user-copy"><b>{currentUser?.name ?? 'Igor'}</b><span>{currentRole}</span></div></div>
+            <div className="top-actions"><span className={`sync-indicator ${online ? 'online' : 'offline'}`}><i />{online ? 'Online · dados locais' : 'Offline · dados locais'}</span><button aria-label="Notificações">♢<i /></button><div className="avatar">IG</div><div className="user-copy"><b>{currentUser?.name ?? 'Igor'}</b><span>{currentRole}</span></div></div>
           </div>
         </header>
 
         <main className="content">
+          <section className="mobile-only mobile-program-header" aria-label="Programa de trabalho"><label>Programa<select aria-label="Programa de trabalho" disabled={savingActivity} value={programId} onChange={(event) => selectProgram(event.target.value)}><option value="Brasil">Brasil · síntese</option>{programs.map((program) => <option key={program.id} value={program.id}>{program.name}</option>)}</select></label><button className="secondary-button" onClick={() => go('historico')} disabled={savingActivity || programId === 'Brasil'}>Meus registros</button></section>
+          {(screen === 'campo' || screen === 'operacional' || screen === 'atividade') && <div className="mobile-only mobile-record-tabs" aria-label="Tipo de registro"><button className={screen !== 'operacional' ? 'active' : ''} disabled={savingActivity} onClick={() => { setSelectedPlan(null); go('campo'); }}>Inspeção de campo</button><button className={screen === 'operacional' ? 'active' : ''} disabled={savingActivity} onClick={() => { setSelectedPlan(null); go('operacional'); }}>Operação / manejo</button></div>}
           <section className="program-hierarchy" aria-label="Pastas de programas">
             <button data-program="Brasil" className={programId === 'Brasil' ? 'active' : ''} onClick={() => selectProgram('Brasil')}>▣ Brasil<small>Síntese nacional</small></button>
             <div>{programs.map((program) => <button data-program={program.id} key={program.id} className={programId === program.id ? 'active' : ''} onClick={() => selectProgram(program.id)}><span>▱ {program.name}</span><b>Rede de locais</b><small>{locations.filter((location) => locationProgram(location) === program.id).length} locais · {allTrials.filter((trial) => locations.some((location) => location.id === trial.locationId && locationProgram(location) === program.id)).length} ensaios</small></button>)}</div>
@@ -919,10 +939,10 @@ export default function Home() {
           {screen === 'mapa' && <MapScreen harvestId={activeHarvestId} trialList={scopedTrials} activities={scopedActivities} schedule={scopedSchedule} weatherConditions={weatherConditions.filter((item) => scopedLocationIds.has(item.locationId))} weatherChecking={weatherChecking} weatherCheckedAt={weatherCheckedAt} onRefreshWeather={refreshWeatherConditions} onLocation={(locationId) => openFiltered({ locationId })} />}
           {screen === 'clima' && <WeatherScreen weatherConditions={weatherConditions.filter((item) => scopedLocationIds.has(item.locationId))} weatherChecking={weatherChecking} weatherCheckedAt={weatherCheckedAt} onRefresh={refreshWeatherConditions} />}
           {screen === 'ensaios' && <TrialsScreen trialList={scopedTrials} activities={scopedActivities} schedule={scopedSchedule} context={viewContext} onClearContext={() => setViewContext({})} onNew={() => go('cadastros')} onTrial={(trial) => { setSelectedTrial(trial); go('detalhe'); }} />}
-          {screen === 'planejamento' && <PlanningScreen trialList={scopedTrials} schedule={scopedSchedule} weatherConditions={weatherConditions.filter((item) => scopedLocationIds.has(item.locationId))} onActivity={openPlannedActivity} onReprogram={reprogramTrial} />}
+          {screen === 'planejamento' && <><div className="mobile-only"><MobileAgenda schedule={scopedSchedule} trials={scopedTrials} locations={scopedLocations} onRecord={openPlannedActivity} /></div><div className="desktop-only"><PlanningScreen trialList={scopedTrials} schedule={scopedSchedule} weatherConditions={weatherConditions.filter((item) => scopedLocationIds.has(item.locationId))} onActivity={openPlannedActivity} onReprogram={reprogramTrial} /></div></>}
           {screen === 'rotas' && <><PageHead eyebrow="Logística de campo" title="Rotas" copy="Organize os locais da semana ou monte uma visita avulsa." /><RoutePlanner locations={scopedLocations} trials={scopedTrials} schedule={scopedSchedule} weather={weatherConditions.filter((item) => scopedLocationIds.has(item.locationId))} /></>}
-          {screen === 'operacional' && <PhenologyActivityForm mode="operational" dynamicFields={activityFields} trialList={scopedTrials} activities={scopedActivities} schedule={scopedSchedule} onSave={saveActivity} defaultTrial={selectedTrial.id} selectedPlan={selectedPlan} />}
-          {(screen === 'campo' || screen === 'atividade') && <PhenologyActivityForm mode="field" dynamicFields={activityFields} trialList={scopedTrials} activities={scopedActivities} schedule={scopedSchedule} onSave={saveActivity} defaultTrial={selectedTrial.id} selectedPlan={selectedPlan} />}
+          {screen === 'operacional' && <PhenologyActivityForm saving={savingActivity} mode="operational" dynamicFields={activityFields} trialList={scopedTrials} activities={scopedActivities} schedule={scopedSchedule} onSave={saveActivity} defaultTrial={selectedTrial.id} selectedPlan={selectedPlan} />}
+          {(screen === 'campo' || screen === 'atividade') && <PhenologyActivityForm saving={savingActivity} mode="field" dynamicFields={activityFields} trialList={scopedTrials} activities={scopedActivities} schedule={scopedSchedule} onSave={saveActivity} defaultTrial={selectedTrial.id} selectedPlan={selectedPlan} />}
           {screen === 'historico' && <HistoryScreen activities={scopedActivities} onNew={() => go('campo')} />}
 
           {screen === 'cadastros' && <AdminRegistrationScreen registeredTrials={registeredTrials} trialList={scopedTrials} activities={scopedActivities} schedule={scopedSchedule} harvests={harvests} activeHarvestId={activeHarvestId} lastUpdated={lastUpdated} dynamicFields={activityFields} onDynamicFields={updateActivityFields} activityTemplates={activityTemplates} onActivityTemplates={updateActivityTemplates} onSave={saveFieldTrial} onImportDataset={importOperationalDataset} onImportUnified={importUnifiedPlanning} onCreatePlanning={createPlanningFromWizard} onAddLocation={addManagedLocation} onAddTrials={addManagedTrials} onCreateHarvest={createHarvest} onHarvestStatus={setHarvestStatus} onHarvest={switchHarvest} onFinalizeLayout={finalizeLayoutPlanning} onDeleteTrial={deleteManagedTrial} onDeleteLocation={deleteManagedLocation} onReportImplementation={reportImplementationIssue} />}
@@ -932,6 +952,7 @@ export default function Home() {
         </main>
       </div>
       {toast && <div className="toast">✓ {toast}</div>}
+      <nav className="mobile-bottom-nav" aria-label="Acessos de campo">{([{ screen: 'planejamento', label: 'Agenda' }, { screen: 'campo', label: 'Registrar' }, { screen: 'rotas', label: 'Rotas' }, { screen: 'mapa', label: 'Mapa' }] as const).map((item) => { const active = screen === item.screen || item.screen === 'campo' && (screen === 'operacional' || screen === 'atividade'); return <button key={item.screen} aria-current={active ? 'page' : undefined} className={active ? 'active' : ''} disabled={savingActivity} onClick={() => { if (programId === 'Brasil') { selectProgram(locations[0] ? locationProgram(locations[0]) : 'U'); setScreen(item.screen); } else go(item.screen); }}><NavIcon screen={item.screen} /><span>{item.label}</span></button>; })}</nav>
     </div>
   );
 }
@@ -1157,14 +1178,14 @@ function activityStreamFor(plan?: PlannedActivity | null): ActivityStream {
   return /seme|plantio|fungic|herbic|pulver|adub|fertiliz|colhe|irrig|aplica/.test(value) ? 'operational' : 'field';
 }
 
-function PhenologyActivityForm({ trialList, activities, schedule, onSave, defaultTrial, selectedPlan, mode, dynamicFields }: { trialList: Trial[]; activities: Activity[]; schedule: PlannedActivity[]; onSave: (event: FormEvent<HTMLFormElement>) => void; defaultTrial: string; selectedPlan: PlannedActivity | null; mode: ActivityStream; dynamicFields: DynamicField[] }) {
+function PhenologyActivityForm({ trialList, activities, schedule, onSave, defaultTrial, selectedPlan, mode, dynamicFields, saving = false }: { trialList: Trial[]; activities: Activity[]; schedule: PlannedActivity[]; onSave: (event: FormEvent<HTMLFormElement>) => void; defaultTrial: string; selectedPlan: PlannedActivity | null; mode: ActivityStream; dynamicFields: DynamicField[]; saving?: boolean }) {
   const locations = useContext(ProgramLocations) ?? baseLocations;
   const defaultLocation = selectedPlan?.locationId ?? trialList.find((trial) => trial.id === (selectedPlan?.trialId ?? defaultTrial))?.locationId ?? locations[0]?.id ?? '';
   const [locationId, setLocationId] = useState(defaultLocation);
   const initialPlan = selectedPlan && activityStreamFor(selectedPlan) === mode ? selectedPlan : schedule.find((item) => item.status !== 'Concluído' && activityStreamFor(item) === mode && (item.locationId === defaultLocation || trialList.find((trial) => trial.id === item.trialId)?.locationId === defaultLocation)) ?? null;
   const [activePlanId, setActivePlanId] = useState(initialPlan?.id ?? '');
   const [visitStage, setVisitStage] = useState<PhenologyVisit>(visitFromPlan(initialPlan));
-  const [visitDate, setVisitDate] = useState(initialPlan?.start ?? sourceSummary.importedAt);
+  const [visitDate, setVisitDate] = useState(() => new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' }));
   const [quality, setQuality] = useState({ establishment: 4, uniformity: 4, weeds: 2, disease: 1 });
   const [groupRatings, setGroupRatings] = useState<Record<string, { score: number; condition: string; notes: string }>>({});
   const [checkedItems, setCheckedItems] = useState<string[]>([]);
@@ -1222,7 +1243,7 @@ function PhenologyActivityForm({ trialList, activities, schedule, onSave, defaul
       {activePlan && <section className="activity-context"><div><span>VISITA PREVISTA NO PLANEJAMENTO</span><b>{activePlan.activity}</b><small>{activePlan.trialId} · {formatDate(activePlan.start)} · versão {activePlan.version}</small></div><Status kind={activePlan.start < sourceSummary.importedAt ? 'attention' : 'ok'}>{activePlan.start < sourceSummary.importedAt ? 'Em atraso' : 'No prazo'}</Status></section>}
       <input type="hidden" name="plannedId" value={activePlan?.id ?? ''} /><input type="hidden" name="recordStream" value={mode} /><input type="hidden" name="baseScope" value="Categoria da área" /><input type="hidden" name="areaCategory" value={activeAreaCategory} /><input type="hidden" name="baseMacroGroup" value={installedGroups[0] ?? groupFromCategory(activeAreaCategory)} /><input type="hidden" name="macroStage" value={macroStage} /><input type="hidden" name="visitStage" value={visitStage} /><input type="hidden" name="groupAssessments" value={assessments} /><input type="hidden" name="calculatedQualityScore" value={combined.score} />
 
-      <section className="card visit-header"><div className="form-grid"><label>Localidade<select name="locationId" value={locationId} onChange={(event) => { const nextLocation = event.target.value; const nextPlan = schedule.find((item) => item.status !== 'Concluído' && activityStreamFor(item) === mode && (item.locationId === nextLocation || trialList.find((trial) => trial.id === item.trialId)?.locationId === nextLocation)); setLocationId(nextLocation); setActivePlanId(nextPlan?.id ?? ''); setVisitStage(visitFromPlan(nextPlan)); setVisitDate(nextPlan?.start ?? sourceSummary.importedAt); setGroupRatings({}); setCheckedItems([]); }}>{locations.map((location) => <option key={location.id} value={location.id}>{location.name}</option>)}</select></label><label>Atividade planejada por categoria<select value={activePlanId} required onChange={(event) => { const plan = schedule.find((item) => item.id === event.target.value); setActivePlanId(event.target.value); setVisitStage(visitFromPlan(plan)); setVisitDate(plan?.start ?? sourceSummary.importedAt); setCheckedItems([]); }}><option value="">Selecione</option>{availablePlans.map((plan) => <option key={plan.id} value={plan.id}>{plan.areaCategory ?? 'Área'} · {plan.activity} · {formatDate(plan.start)}</option>)}</select></label><label>Data realizada<input name="date" type="date" value={visitDate} onChange={(event) => setVisitDate(event.target.value)} required /></label></div><div className="visit-summary"><span><b>{activeAreaCategory}</b><small>categoria da atividade</small></span><span><b>{categoryTrials.length}</b><small>ensaios abrangidos</small></span><span><b>{availablePlans.length}</b><small>atividades abertas</small></span></div></section>
+      <section className="card visit-header"><div className="form-grid"><label>Localidade<select name="locationId" value={locationId} onChange={(event) => { const nextLocation = event.target.value; const nextPlan = schedule.find((item) => item.status !== 'Concluído' && activityStreamFor(item) === mode && (item.locationId === nextLocation || trialList.find((trial) => trial.id === item.trialId)?.locationId === nextLocation)); setLocationId(nextLocation); setActivePlanId(nextPlan?.id ?? ''); setVisitStage(visitFromPlan(nextPlan)); setVisitDate(new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' })); setGroupRatings({}); setCheckedItems([]); }}>{locations.map((location) => <option key={location.id} value={location.id}>{location.name}</option>)}</select></label><label>Atividade planejada por categoria<select value={activePlanId} required onChange={(event) => { const plan = schedule.find((item) => item.id === event.target.value); setActivePlanId(event.target.value); setVisitStage(visitFromPlan(plan)); setVisitDate(new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' })); setCheckedItems([]); }}><option value="">Selecione</option>{availablePlans.map((plan) => <option key={plan.id} value={plan.id}>{plan.areaCategory ?? 'Área'} · {plan.activity} · {formatDate(plan.start)}</option>)}</select></label><label>Data realizada<input name="date" type="date" value={visitDate} onChange={(event) => setVisitDate(event.target.value)} required /></label></div><div className="visit-summary"><span><b>{activeAreaCategory}</b><small>categoria da atividade</small></span><span><b>{categoryTrials.length}</b><small>ensaios abrangidos</small></span><span><b>{availablePlans.length}</b><small>atividades abertas</small></span></div></section>
 
       <section className="card form-card visit-stage-card"><div className="section-number">01</div><div><h2>Roteiro previsto</h2><p>A fase e os itens vêm do planejamento e não são alterados durante o registro.</p></div><div><div className="phenology-steps phenology-readonly">{visitOrder.map((stage, index) => <span className={visitStage === stage ? 'active' : visitOrder.indexOf(stage) < visitOrder.indexOf(visitStage) ? 'done' : ''} key={stage}><i>{String(index + 1).padStart(2,'0')}</i><b>{stage}</b></span>)}</div><div className="visit-focus"><span>FOCO DESTA VISITA</span><b>{protocols[visitStage].focus}</b></div></div></section>
 
@@ -1237,9 +1258,9 @@ function PhenologyActivityForm({ trialList, activities, schedule, onSave, defaul
 
       {mode === 'operational' && /fungic|herbic|insetic|aplica|pulver/i.test(activePlan?.activity ?? '') && activeDynamicFields.length > 0 && <section className="card form-card dynamic-record-fields"><div className="section-number">03</div><div><h2>Campos complementares</h2><p>Opcionais e exibidos somente para aplicações.</p></div><div className="form-grid">{activeDynamicFields.map((field) => <DynamicFieldInput key={field.id} field={field} />)}</div></section>}
 
-      <section className="card quick-note-card"><label>Anotação rápida<textarea name="notes" rows={3} placeholder="Registre ocorrências, decisões e recomendações para a próxima visita…" /></label></section>
+      <section className="card quick-note-card"><PhotoCapture /><label>Anotação rápida<textarea name="notes" rows={3} placeholder="O que foi observado ou realizado?" /></label></section>
 
-      <section className="form-actions"><span>O registro fica salvo offline neste dispositivo e entra na fila de sincronização quando a conexão retornar.</span><div><button type="reset" className="secondary-button">Limpar</button><button type="submit" className="primary-button" disabled={!installedGroups.length || !activePlan}>✓ Salvar visita</button></div></section>
+      <section className="form-actions"><span>O registro e as fotos ficam guardados neste navegador. Confira depois em Meus registros.</span><div><button type="reset" className="secondary-button">Limpar</button><button type="submit" className="primary-button" disabled={saving || !installedGroups.length || !activePlan}>{saving ? 'Salvando registro e fotos…' : '✓ Salvar atividade'}</button></div></section>
     </form>
   </>;
 }
@@ -1268,7 +1289,7 @@ function HistoryScreen({ activities, onNew }: { activities: Activity[]; onNew: (
   const locations = useContext(ProgramLocations) ?? baseLocations;
   return <><PageHead eyebrow="Rastreabilidade" title="Histórico de manejo" copy="Todas as atividades registradas na rede, da mais recente para a mais antiga." action={<button className="primary-button" onClick={onNew}>＋ Nova atividade</button>} />
     <section className="toolbar"><button>Todos os ensaios⌄</button><button>Todos os tipos⌄</button><button>Últimos 30 dias⌄</button></section>
-    <section className="card history-list">{activities.map((activity) => <article key={activity.id}><div className="timeline-dot" /><time>{activity.date}</time><div className="activity-icon">✓</div><div className="activity-copy"><span>{activity.macroStage ?? activity.type}</span><h2>{activity.notes}</h2><p><b>{activity.locationId ? locations.find((location) => location.id === activity.locationId)?.name : activity.trial}</b>{activity.scope ? ` · ${activity.scope}${activity.scope !== 'Área total' ? `: ${activity.macroGroup}` : ''}` : ''} · Registrado por {activity.owner}{activity.qualityScore !== undefined ? ` · Qualidade ${activity.qualityScore}/100 (${activity.qualityClass})` : ''}</p>{activity.checks && <small>{activity.checks.length} checks concluídos{activity.photos?.length ? ` · ${activity.photos.length} foto(s)` : ''}</small>}</div><button aria-label="Mais opções">•••</button></article>)}</section>
+    <section className="card history-list">{activities.map((activity) => <article key={activity.id}><div className="timeline-dot" /><time>{activity.date}</time><div className="activity-icon">✓</div><div className="activity-copy"><span>{activity.macroStage ?? activity.type}</span><h2>{activity.notes}</h2><p><b>{activity.locationId ? locations.find((location) => location.id === activity.locationId)?.name : activity.trial}</b>{activity.scope ? ` · ${activity.scope}${activity.scope !== 'Área total' ? `: ${activity.macroGroup}` : ''}` : ''} · Registrado por {activity.owner}{activity.qualityScore !== undefined ? ` · Qualidade ${activity.qualityScore}/100 (${activity.qualityClass})` : ''}</p>{activity.checks && <small>{activity.checks.length} checks concluídos{activity.photos?.length ? ` · ${activity.photos.length} foto(s)` : ''}</small>}{Boolean(activity.photoIds?.length) && <details className="saved-record-photos"><summary>Ver {activity.photoIds?.length} foto(s) do registro</summary><ActivityPhotoGallery ids={activity.photoIds!} /></details>}</div><button aria-label="Mais opções">•••</button></article>)}</section>
   </>;
 }
 
