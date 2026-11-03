@@ -29,7 +29,7 @@ export function generateListLayout(entries: ListEntry[], options: ListLayoutOpti
     if (cuts.some((cut) => !Number.isInteger(cut) || cut < 1 || cut >= items.length)) throw new Error(`Quebras de ${name}: use posições entre 1 e ${items.length - 1}.`);
     let start = 0;
     const chunks = [...cuts, items.length].map((end) => { const chunk = items.slice(start, end); start = end; return chunk; });
-    const id = `lista-${allocations.length + 1}`;
+    const id = 'lista-' + encodeURIComponent(name);
     chunks.forEach((chunk) => {
     chunk.forEach((entry, index) => {
       const block = Math.floor(index / (trialRows * 10));

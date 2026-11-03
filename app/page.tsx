@@ -2,21 +2,25 @@
 
 import dynamic from 'next/dynamic';
 import { FormEvent, createContext, useContext, useEffect, useMemo, useState } from 'react';
+import type { Screen, ActivityStream, MacroGroup, MacroStage, PhenologyVisit, Activity, PlannedActivity, Trial, ViewContext, PlanningWizardConfig, HarvestStatus, Harvest, HarvestSnapshot, DynamicFieldType, DynamicField, ActivityTemplate, AppRole } from '../domain/types';
 import type { NetworkLocation } from '../components/NetworkMap';
+import type { LayoutSnapshot } from '../domain/layout';
 import type { LayoutFinalization } from '../components/FieldLayoutMap';
 import { fetchWeatherConditions, type LocationWeather } from '../lib/weatherAlerts';
 import RoutePlanner from '../components/RoutePlanner';
+import { readArray, readJson } from '../lib/storage';
+import { saveHarvestBundle } from '../lib/harvestRepository';
+import { buildFieldPlanning } from '../lib/fieldPlanning';
+import { groupFromCategory, macroGroupFor } from '../lib/trialGroups';
+import { actualSowingDate, activityAppliesToTrial, isTrialHarvested } from '../lib/fieldStatus';
+import { todayIso } from '../lib/dates';
+import { addDays } from '../lib/dates';
 import { parseLayout, stringifyLayout } from '../lib/layoutStorage';
 import { mountNavigationAssistant } from '../lib/navigation-assistant.js';
 import MobileAgenda from '../components/MobileAgenda';
 import { PhotoCapture, ActivityPhotoGallery } from '../components/ActivityPhotos';
 import { saveActivityPhotos, deleteActivityPhotos } from '../lib/activityPhotos';
 import {
-  importedActivities,
-  importedLocations,
-  importedPlanning,
-  importedSource,
-  importedTrials,
   importedUsers,
   sourceSummary,
 } from './data/rede';
@@ -24,23 +28,6 @@ import {
 const NetworkMap = dynamic(() => import('../components/NetworkMap'), { ssr: false });
 const FieldLayoutMap = dynamic(() => import('../components/FieldLayoutMap'), { ssr: false });
 
-type Screen = 'dashboard' | 'mapa' | 'clima' | 'ensaios' | 'planejamento' | 'rotas' | 'operacional' | 'campo' | 'atividade' | 'historico' | 'usuarios' | 'cadastros' | 'detalhe';
-type ActivityStream = 'operational' | 'field';
-type MacroGroup = 'Ensaios' | 'Coleção' | 'Founder' | 'PD' | 'Multiqualidades' | 'Outro';
-type MacroStage = 'Semeadura' | 'Condução' | 'Colheita';
-type PhenologyVisit = 'Semeadura' | 'Perfilhamento' | 'Alongamento' | 'Emborrachamento' | 'Espigamento' | 'Enchimento de grão' | 'Maturidade';
-type Activity = { id: number; date: string; trial: string; type: string; owner: string; notes: string; stream?: ActivityStream; plannedId?: string; qualityScore?: number; qualityClass?: string; locationId?: string; scope?: string; macroGroup?: MacroGroup; macroStage?: MacroStage; checks?: string[]; photos?: string[]; photoIds?: string[]; details?: Record<string, string>; alertCategory?: string; qualityPenalty?: number; plotIds?: string[] };
-type PlannedActivity = { id: string; trialId: string; locationId?: string; areaCategory?: string; activityTemplateId?: string; activity: string; category: string; start: string; end: string; owner: string; priority: string; status: string; notes: string; originalStart: string; originalEnd: string; version: number };
-type Trial = { id: string; name: string; type: string; subtype?: string; year: number; cycle: string; locationId: string; plots: number; sowing: string; harvest: string; owner: string; rawStatus: string; priority: string; notes: string; place: string; city: string; status: string; progress: number; next: string; nextDate: string; date: string; fieldName?: string; area?: number; mapId?: string; areaCategory?: string; issueCount?: number; affectedPlots?: string[]; lostPlots?: string[]; layoutPenalty?: number };
-type ViewContext = { locationId?: string; operational?: 'ok' | 'late' };
-type PlanningWizardConfig = { locationId: string; trialIds: string[]; profile: 'Essencial' | 'Completo' | 'Monitoramento' };
-type HarvestStatus = 'Ativa' | 'Encerrada';
-type Harvest = { id: string; name: string; status: HarvestStatus; createdAt: string; updatedAt: string; quality: number };
-type HarvestSnapshot = { locations: NetworkLocation[]; trials: Trial[]; schedule: PlannedActivity[]; activities: Activity[]; source: Record<string, unknown>[]; updatedAt: string };
-type DynamicFieldType = 'text' | 'select' | 'number' | 'date';
-type DynamicField = { id: string; label: string; type: DynamicFieldType; options: string[]; entity: ActivityStream | 'both'; visibleField: boolean; visibleOperational: boolean };
-type ActivityTemplate = { id: string; name: string; stream: ActivityStream; stage: PhenologyVisit; offset: number; categories: string[]; enabled: boolean };
-type AppRole = 'Administrador' | 'Gestor' | 'RA' | 'Técnico responsável';
 
 const defaultActivityTemplates: ActivityTemplate[] = [
   { id: 'op-sowing', name: 'Semeadura', stream: 'operational', stage: 'Semeadura', offset: 0, categories: ['Ensaios','Coleções','PDs','Founder','Segregantes','Ensaios de N','Ensaios de fungicida','Nursery','Multiqualidades'], enabled: true },
@@ -67,8 +54,6 @@ const baseLocations: NetworkLocation[] = [];
 const baseTrials: Trial[] = [];
 const basePlanning: PlannedActivity[] = [];
 const baseActivities: Activity[] = [];
-const locations: NetworkLocation[] = baseLocations.map((location) => ({ ...location }));
-const trials: Trial[] = baseTrials.map((trial) => ({ ...trial }));
 const initialPlanning: PlannedActivity[] = basePlanning.map((activity) => ({ ...activity }));
 const initialActivities: Activity[] = baseActivities.map((activity) => ({ ...activity }));
 const blankTrial: Trial = { id: '', name: '', type: '', year: 2026, cycle: 'Safra 2026', locationId: '', plots: 0, sowing: sourceSummary.importedAt, harvest: sourceSummary.importedAt, owner: '', rawStatus: 'Planejado', priority: 'Normal', notes: '', place: '', city: '', status: 'Planejado', progress: 0, next: '', nextDate: sourceSummary.importedAt, date: '' };
@@ -79,7 +64,6 @@ const roleScreens: Record<AppRole, Screen[]> = {
   RA: ['dashboard','mapa','rotas','clima','ensaios','planejamento','operacional','campo','atividade','historico','cadastros','detalhe'],
   'Técnico responsável': ['dashboard','mapa','rotas','clima','ensaios','planejamento','operacional','campo','atividade','historico','detalhe'],
 };
-const totalRegions = 0;
 function dateParts(iso: string) {
   const date = new Date(`${iso}T12:00:00`);
   return {
@@ -92,11 +76,7 @@ function formatDate(iso: string) {
   return new Date(`${iso}T12:00:00`).toLocaleDateString('pt-BR');
 }
 
-function addDays(iso: string, days: number) {
-  const date = new Date(`${iso}T12:00:00`);
-  date.setDate(date.getDate() + days);
-  return date.toISOString().slice(0, 10);
-}
+
 
 function daysBetween(from: string, to: string) {
   return Math.round((new Date(`${to}T12:00:00`).getTime() - new Date(`${from}T12:00:00`).getTime()) / 86400000);
@@ -115,7 +95,7 @@ function adversePenalty(category: string, quantity: number, manual?: number) {
 }
 
 function trialQuality(trial: Trial, activities: Activity[]) {
-  const registered = activities.find((activity) => activity.trial === trial.id && typeof activity.qualityScore === 'number');
+  const registered = activities.find((activity) => activityAppliesToTrial(activity, trial) && typeof activity.qualityScore === 'number');
   const baseScore = registered?.qualityScore ?? (trial.priority === 'Crítica' ? 46 : trial.priority === 'Alta' ? 64 : 76);
   const applicableAlerts = activities.filter((activity) => (activity.trial === trial.id || (activity.locationId === trial.locationId && (activity.scope === 'Local inteiro' || activity.scope === 'Tipo de ensaio' && activity.macroGroup === macroGroupFor(trial)))) && Number(activity.qualityPenalty ?? 0) > 0);
   const penalty = Math.min(100, applicableAlerts.reduce((sum, activity) => sum + Number(activity.qualityPenalty ?? 0), 0));
@@ -125,26 +105,9 @@ function trialQuality(trial: Trial, activities: Activity[]) {
   return { score, label, tone, measured: Boolean(registered), penalty: penalty + (trial.layoutPenalty ?? 0), alerts: applicableAlerts };
 }
 
-function groupFromCategory(category?: string): MacroGroup {
-  const value = String(category ?? '').toLowerCase();
-  if (value.includes('founder')) return 'Founder';
-  if (value.includes('cole')) return 'Coleção';
-  if (value.includes('multi')) return 'Multiqualidades';
-  if (/^pd|\bpd\b/.test(value)) return 'PD';
-  if (value.includes('outro')) return 'Outro';
-  return 'Ensaios';
-}
 
-function macroGroupFor(trial: Trial): MacroGroup {
-  if (trial.areaCategory) return groupFromCategory(trial.areaCategory);
-  const value = `${trial.type} ${trial.name}`.toLowerCase();
-  if (value.includes('founder')) return 'Founder';
-  if (value.includes('cole')) return 'Coleção';
-  if (value.includes('multi')) return 'Multiqualidades';
-  if (/(^|[\s_-])pd([\s_-]|$)/.test(value)) return 'PD';
-  if (value.includes('outro')) return 'Outro';
-  return 'Ensaios';
-}
+
+
 
 function qualityTone(score: number): Exclude<NonNullable<NetworkLocation['qualityTone']>, 'neutral'> {
   return score >= 85 ? 'excellent' : score >= 70 ? 'adequate' : score >= 50 ? 'attention' : 'critical';
@@ -156,20 +119,7 @@ function activityDateIso(value: string) {
   return parts.length === 3 ? parts.reverse().join('-') : value.slice(0, 10);
 }
 
-function actualSowingDate(trial: Trial, activities: Activity[], schedule: PlannedActivity[]) {
-  const records = activities.filter((activity) => {
-    const plan = schedule.find((item) => item.id === activity.plannedId);
-    if (plan?.activityTemplateId === 'op-fill-sowing' || /plantio do enchimento/i.test(plan?.activity ?? '')) return false;
-    const stream = activity.stream ?? (activity.details?.fluxo as ActivityStream | undefined) ?? (plan ? activityStreamFor(plan) : undefined);
-    if (stream !== 'operational' || activity.macroStage !== 'Semeadura' || activity.details?.condicao_operacao === 'Não executado') return false;
-    if (activity.trial === trial.id) return true;
-    if (activity.locationId !== trial.locationId) return false;
-    if (activity.scope === 'Área total') return true;
-    const sameCategory = activity.details?.categoria_area && activity.details.categoria_area === (trial.areaCategory ?? trial.type);
-    return sameCategory || activity.macroGroup === macroGroupFor(trial);
-  });
-  return records.map((record) => activityDateIso(record.date)).filter(Boolean).sort()[0];
-}
+
 
 function rhaCode(value?: string) {
   const number = String(value ?? '').match(/[123]/)?.[0] ?? '1';
@@ -196,7 +146,7 @@ function localityOverview(locationId: string, trialList: Trial[], activities: Ac
   };
   const sowing = plantedPercent;
   const conduction = completion((item) => !/seme|identifica|etiqueta|colhe/i.test(`${item.activity} ${item.category}`), plantedPercent > 0 ? 35 : 0);
-  const harvest = Math.max(Math.round((localTrials.filter((trial) => trial.harvest <= sourceSummary.importedAt).length / Math.max(localTrials.length, 1)) * 100), completion((item) => /colhe/i.test(`${item.activity} ${item.category}`), 0));
+  const harvest = Math.round(localTrials.filter((trial) => isTrialHarvested(trial, activities, schedule)).length / Math.max(localTrials.length, 1) * 100);
   const groups = [...new Set(localTrials.map(macroGroupFor))];
   return { localTrials, planted, plantedPercent, stage, quality, tone: qualityTone(quality), sowing, conduction, harvest, groups };
 }
@@ -233,7 +183,6 @@ const navItems: { screen: Screen; icon: string; label: string }[] = [
 ];
 
 function Status({ kind, children }: { kind: 'ok' | 'attention' | 'late'; children: React.ReactNode }) {
-  const locations = useContext(ProgramLocations) ?? baseLocations;
   return <span className={`status-pill ${kind}`}><i />{children}</span>;
 }
 
@@ -284,6 +233,8 @@ const programs = [
   { id: 'X', name: 'Programa X', program: 'Programa X' },
 ];
 export default function Home() {
+  const [locations, setLocations] = useState<NetworkLocation[]>(() => readArray('field-wheat-locations-clean-v1'));
+  const [trials, setTrials] = useState<Trial[]>(() => readArray('field-wheat-imported-trials-clean-v1'));
   const [programId, setProgramId] = useState('Brasil');
   const [phase, setPhase] = useState<'login' | 'profile' | 'app'>('login');
   const [savingActivity, setSavingActivity] = useState(false);
@@ -300,7 +251,7 @@ export default function Home() {
       persistHarvestSnapshot(empty);
       keys.forEach((key) => localStorage.removeItem(key));
       for (const key of ['field-wheat-locations-clean-v1', 'field-wheat-imported-trials-clean-v1', 'field-wheat-trials-clean-v1', 'field-wheat-schedule-clean-v1', 'field-wheat-activities-clean-v1', 'field-wheat-unified-source-v1']) localStorage.setItem(key, '[]');
-      locations.splice(0); trials.splice(0); setRegisteredTrials([]); setSchedule([]); setActivities([]); setSelectedTrial(blankTrial); setSelectedPlan(null); setWeatherConditions([]); setWeatherCheckedAt(''); localStorage.removeItem('field-wheat-weather-conditions-v2'); localStorage.removeItem('field-wheat-weather-checked-v2'); setAreaBackupAvailable(true); setDataVersion((value) => value + 1);
+      setLocations([]); setTrials([]); setRegisteredTrials([]); setSchedule([]); setActivities([]); setSelectedTrial(blankTrial); setSelectedPlan(null); setWeatherConditions([]); setWeatherCheckedAt(''); localStorage.removeItem('field-wheat-weather-conditions-v2'); localStorage.removeItem('field-wheat-weather-checked-v2'); setAreaBackupAvailable(true);
       setToast('Áreas da safra limpas. Uma cópia recuperável foi preservada neste navegador.');
     } catch { setToast('Não foi possível preservar a cópia de segurança. A limpeza não foi concluída.'); }
   }
@@ -313,7 +264,7 @@ export default function Home() {
       Object.entries(backup.layouts).forEach(([key, value]) => localStorage.setItem(key, value));
       persistHarvestSnapshot(snapshot);
       localStorage.setItem('field-wheat-unified-source-v1', JSON.stringify(snapshot.source));
-      locations.splice(0, locations.length, ...snapshot.locations); trials.splice(0, trials.length, ...snapshot.trials); setRegisteredTrials([]); setSchedule(snapshot.schedule); setActivities(snapshot.activities); setSelectedTrial(snapshot.trials[0] ?? blankTrial); setDataVersion((value) => value + 1);
+      setLocations(snapshot.locations); setTrials(snapshot.trials); setRegisteredTrials([]); setSchedule(snapshot.schedule); setActivities(snapshot.activities); setSelectedTrial(snapshot.trials[0] ?? blankTrial);
       setToast('Cópia das áreas recuperada.');
     } catch { setToast('Não foi possível recuperar a cópia das áreas.'); }
   }
@@ -323,12 +274,11 @@ export default function Home() {
   }, [phase]);
   const [currentRole, setCurrentRole] = useState<AppRole>(() => typeof window === 'undefined' ? 'Administrador' : (localStorage.getItem('field-wheat-current-role-v1') as AppRole) || 'Administrador');
   const [screen, setScreen] = useState<Screen>('dashboard');
-  const [dataVersion, setDataVersion] = useState(0);
   const [registeredTrials, setRegisteredTrials] = useState<Trial[]>(() => {
     if (typeof window === 'undefined') return [];
     try { return JSON.parse(window.localStorage.getItem('field-wheat-trials-clean-v1') ?? '[]'); } catch { return []; }
   });
-  const allTrials = useMemo(() => [...registeredTrials, ...trials], [registeredTrials, dataVersion]);
+  const allTrials = useMemo(() => [...new Map([...trials, ...registeredTrials].map((trial) => [trial.id, trial])).values()], [registeredTrials, trials]);
   const [selectedTrial, setSelectedTrial] = useState<Trial>(blankTrial);
   const [selectedPlan, setSelectedPlan] = useState<PlannedActivity | null>(null);
   const [schedule, setSchedule] = useState<PlannedActivity[]>(() => {
@@ -439,48 +389,22 @@ export default function Home() {
       const storedTrials = JSON.parse(localStorage.getItem('field-wheat-imported-trials-clean-v1') ?? '[]') as Trial[];
       const savedLocations = (snapshot ? snapshot.locations : storedLocations.length ? storedLocations : baseLocations).map((location) => ({ ...location, program: locationProgram(location) }));
       const savedTrials = snapshot ? snapshot.trials : storedTrials.length ? storedTrials : baseTrials;
-      locations.splice(0, locations.length, ...savedLocations);
-      trials.splice(0, trials.length, ...savedTrials);
+      setLocations(savedLocations);
+      setTrials(savedTrials);
       if (snapshot) { setSchedule(snapshot.schedule); setActivities(snapshot.activities); setLastUpdated(snapshot.updatedAt); localStorage.setItem('field-wheat-unified-source-v1', JSON.stringify(snapshot.source)); }
       if (savedTrials[0]) setSelectedTrial(savedTrials[0]);
-      setDataVersion((value) => value + 1);
+
     } catch { /* A base incorporada permanece disponível quando o armazenamento local é inválido. */ }
   }, []);
 
-  useEffect(() => {
-    const workflowVersion = `base-${sourceSummary.importedAt}-v1`;
-    if (localStorage.getItem('field-wheat-workflow-version') === workflowVersion) return;
-    if (!locations.length || !trials.length) {
-      const seededLocations = baseLocations.map((location) => ({ ...location }));
-      const seededTrials = baseTrials.map((trial) => ({ ...trial }));
-      const seededSchedule = basePlanning.map((activity) => ({ ...activity }));
-      const seededActivities = baseActivities.map((activity) => ({ ...activity }));
-      locations.splice(0, locations.length, ...seededLocations);
-      trials.splice(0, trials.length, ...seededTrials);
-      setSchedule(seededSchedule); setActivities(seededActivities); setSelectedTrial(seededTrials[0] ?? blankTrial);
-      localStorage.setItem('field-wheat-locations-clean-v1', JSON.stringify(seededLocations));
-      localStorage.setItem('field-wheat-imported-trials-clean-v1', JSON.stringify(seededTrials));
-      localStorage.setItem('field-wheat-schedule-clean-v1', JSON.stringify(seededSchedule));
-      localStorage.setItem('field-wheat-activities-clean-v1', JSON.stringify(seededActivities));
-      localStorage.setItem('field-wheat-unified-source-v1', '[]');
-      const updatedAt = new Date().toISOString();
-      try {
-        const snapshots = JSON.parse(localStorage.getItem('field-wheat-harvest-data-v2') ?? '{}') as Record<string, HarvestSnapshot>;
-        snapshots[activeHarvestId] = { locations: seededLocations, trials: seededTrials, schedule: seededSchedule, activities: seededActivities, source: [], updatedAt };
-        localStorage.setItem('field-wheat-harvest-data-v2', JSON.stringify(snapshots));
-      } catch { /* O app continua com a base incorporada mesmo sem o histórico local. */ }
-      setLastUpdated(updatedAt); setDataVersion((value) => value + 1);
-    }
-    localStorage.setItem('field-wheat-workflow-version', workflowVersion);
-  }, []);
 
   function switchHarvest(harvestId: string) {
     persistHarvestSnapshot();
     const snapshots = JSON.parse(localStorage.getItem('field-wheat-harvest-data-v2') ?? '{}') as Record<string, HarvestSnapshot>;
     const snapshot = snapshots[harvestId] ?? { locations: [], trials: [], schedule: [], activities: [], source: [], updatedAt: '' };
-    locations.splice(0, locations.length, ...snapshot.locations); trials.splice(0, trials.length, ...snapshot.trials);
+    setLocations(snapshot.locations); setTrials(snapshot.trials);
     setRegisteredTrials([]); setSchedule(snapshot.schedule); setActivities(snapshot.activities); setSelectedTrial(snapshot.trials[0] ?? blankTrial); setLastUpdated(snapshot.updatedAt);
-    localStorage.setItem('field-wheat-unified-source-v1', JSON.stringify(snapshot.source)); localStorage.setItem('field-wheat-active-harvest-v2', harvestId); setActiveHarvestId(harvestId); setDataVersion((value) => value + 1); go('dashboard');
+    localStorage.setItem('field-wheat-unified-source-v1', JSON.stringify(snapshot.source)); localStorage.setItem('field-wheat-active-harvest-v2', harvestId); setActiveHarvestId(harvestId);  go('dashboard');
   }
 
   function createHarvest(name: string, clonePlanning: boolean) {
@@ -507,13 +431,13 @@ export default function Home() {
   const activeProgram = programs.find((program) => program.id === programId);
   function assignLocationProgram(locationId: string, program: 'U' | 'K' | 'X') {
     const nextLocations = locations.map((location) => ({ ...location, program: location.id === locationId ? program : locationProgram(location) }));
-    locations.splice(0, locations.length, ...nextLocations);
+    setLocations(nextLocations);
     localStorage.setItem('field-wheat-locations-clean-v1', JSON.stringify(nextLocations));
     const source = JSON.parse(localStorage.getItem('field-wheat-unified-source-v1') ?? '[]') as Record<string, unknown>[];
     const nextSource = source.map((row) => String(row.local_codigo) === locationId ? { ...row, programa: program } : row);
     localStorage.setItem('field-wheat-unified-source-v1', JSON.stringify(nextSource));
     const updatedAt = persistHarvestSnapshot({ locations: nextLocations, source: nextSource });
-    touchHarvest(updatedAt); setDataVersion((value) => value + 1);
+    touchHarvest(updatedAt);
   }
   const selectProgram = (id: string) => { setProgramId(id); if (screen === 'detalhe') setScreen('ensaios'); setSelectedPlan(null); setViewContext({}); setSelectedTrial(allTrials.find((trial) => locations.some((location) => location.id === trial.locationId && locationProgram(location) === id)) ?? blankTrial); };
   const go = (next: Screen) => { if (programId === 'Brasil' && !['dashboard','usuarios'].includes(next)) { setToast('Abra um programa para acessar o acompanhamento operacional.'); return; } setScreen(next); setMenuOpen(false); window.scrollTo({ top: 0, behavior: 'smooth' }); };
@@ -584,23 +508,20 @@ export default function Home() {
       details: { categoria_area: areaCategory, estadio: String(data.get('visitStage') || data.get('stage') || ''), estadio_previsto: String(data.get('expectedStage') || ''), motivo_alteracao_estadio: String(data.get('stageReason') || ''), fluxo: recordStream, condicao_operacao: String(data.get('condition') || ''), enchimento_plantado: String(data.get('fillPlanted') || ''), data_prevista_enchimento: needsFill ? fillDate : '', produto: String(data.get('product') || ''), dose: String(data.get('dose') || ''), estabelecimento: String(establishment), uniformidade: String(uniformity), daninhas: String(weeds), doencas: String(disease), controle_daninhas: String(data.get('weedControl') || ''), oidio: String(data.get('oidio') || ''), ferrugem: String(data.get('ferrugem') || ''), manchas: String(data.get('manchas') || ''), ocorrencia: String(data.get('adverseDescription') || ''), quantidade_afetada: String(adverseQuantity), ...Object.fromEntries([...data.entries()].filter(([key]) => key.startsWith('dynamic-')).map(([key, value]) => [key.slice(8), String(value)])) },
     };
     const updated = [next, ...activities];
-    window.localStorage.setItem('field-wheat-activities-clean-v1', JSON.stringify(updated));
-    recordCommitted = true;
-    setActivities(updated);
-    if (!navigator.onLine) { const queued = pendingSync + 1; localStorage.setItem('field-wheat-pending-sync-v1', String(queued)); setPendingSync(queued); }
+    let nextSchedule = schedule;
     if (plannedId || needsFill) {
-      let nextSchedule = schedule.map((item) => item.id === plannedId ? { ...item, status: 'Concluído' } : item);
+      nextSchedule = schedule.map((item) => item.id === plannedId ? { ...item, status: 'Concluído' } : item);
       if (needsFill) {
         const pendingFill = nextSchedule.find((item) => item.locationId === locationId && item.areaCategory === areaCategory && item.activityTemplateId === 'op-fill-sowing' && item.status !== 'Concluído');
         const fillPlan: PlannedActivity = { id: pendingFill?.id ?? `fill-${activityId}`, trialId: matchingTrial.id, locationId, areaCategory, activityTemplateId: 'op-fill-sowing', activity: 'Plantio do enchimento', category: 'Operacional', start: fillDate, end: fillDate, owner: activePlan?.owner ?? next.owner, priority: 'Normal', status: 'Não iniciado', notes: `Enchimento não plantado no registro de ${next.date}. Abrangência: ${areaCategory}.`, originalStart: pendingFill?.originalStart ?? fillDate, originalEnd: pendingFill?.originalEnd ?? fillDate, version: pendingFill ? pendingFill.version + 1 : 1 };
         nextSchedule = [...nextSchedule.filter((item) => item.id !== fillPlan.id), fillPlan];
       }
-      setSchedule(nextSchedule);
-      window.localStorage.setItem('field-wheat-schedule-clean-v1', JSON.stringify(nextSchedule));
-      const updatedAt = persistHarvestSnapshot({ activities: updated, schedule: nextSchedule }); touchHarvest(updatedAt, updated);
-    } else {
-      const updatedAt = persistHarvestSnapshot({ activities: updated }); touchHarvest(updatedAt, updated);
     }
+    const snapshot: HarvestSnapshot = { locations, trials: allTrials, schedule: nextSchedule, activities: updated, source: readJson('field-wheat-unified-source-v1', []), updatedAt: new Date().toISOString() };
+    const queued = navigator.onLine ? pendingSync : pendingSync + 1;
+    const nextHarvests = saveHarvestBundle(activeHarvestId, snapshot, harvests, { 'field-wheat-pending-sync-v1': String(queued) });
+    recordCommitted = true;
+    setActivities(updated); setSchedule(nextSchedule); setHarvests(nextHarvests); setLastUpdated(snapshot.updatedAt); setPendingSync(queued);
     setSelectedPlan(null);
     setToast(recordStream === 'field' ? `Registro de campo salvo em ${locations.find((location) => location.id === locationId)?.name}. Qualidade: ${quality.label} (${quality.score}/100).` : `Registro operacional salvo em ${locations.find((location) => location.id === locationId)?.name}.`);
     go('historico');
@@ -649,9 +570,9 @@ export default function Home() {
     if (dataset === 'Planejamento') { importPlanningRows(rows); return; }
     if (dataset === 'Localidades') {
       const imported = rows.map((row): NetworkLocation => ({ id: String(row.id), name: String(row.nome), city: String(row.cidade), region: String(row.regiao), lat: Number(row.latitude), lng: Number(row.longitude), trials: 0, plots: 0, status: 'ok' }));
-      locations.splice(0, locations.length, ...imported);
+      setLocations(imported);
       localStorage.setItem('field-wheat-locations-clean-v1', JSON.stringify(imported));
-      setDataVersion((value) => value + 1);
+
       setToast(`${imported.length} localidades carregadas.`);
     } else if (dataset === 'Campos') {
       localStorage.setItem('field-wheat-fields-clean-v1', JSON.stringify(rows));
@@ -665,10 +586,10 @@ export default function Home() {
         const id = String(row.ensaio_id ?? `ENS-${index + 1}`);
         return { id, name: String(row.nome ?? id), type: String(row.grupo ?? row.tipo ?? 'Outro'), year: Number(sowing.slice(0,4)) || 2026, cycle: 'Safra 2026', locationId: location?.id ?? '', plots: Number(row.parcelas ?? 0), sowing, harvest: addDays(sowing, 120), owner: String(row.responsavel ?? 'Equipe de campo'), rawStatus: 'Planejado', priority: String(row.prioridade ?? 'Normal'), notes: String(row.observacoes ?? ''), place: location?.name ?? '', city: location?.city ?? '', status: 'Planejado', progress: 0, next: 'Semeadura', nextDate: sowing, date: formatDate(sowing), fieldName: String(field?.nome ?? row.campo_id ?? '') };
       }).filter((trial) => trial.locationId);
-      trials.splice(0, trials.length, ...imported);
+      setTrials(imported);
       localStorage.setItem('field-wheat-imported-trials-clean-v1', JSON.stringify(imported));
       if (imported[0]) setSelectedTrial(imported[0]);
-      setDataVersion((value) => value + 1);
+
       setToast(`${imported.length} ensaios carregados e vinculados aos campos.`);
     } else if (dataset === 'Atividades') {
       const imported = rows.map((row, index): Activity => { const stage = String(row.etapa ?? 'Visita'); const stream: ActivityStream = /semeadura|aduba|aplica|colheita/i.test(stage) ? 'operational' : 'field'; return { id: Date.now() + index, date: String(row.data ?? ''), trial: String(row.ensaio_id ?? ''), type: stage, stream, owner: String(row.responsavel ?? 'Equipe de campo'), notes: String(row.observacoes ?? ''), locationId: String(row.localidade_id ?? ''), macroStage: /semeadura/i.test(stage) ? 'Semeadura' : /colheita|maturidade/i.test(stage) ? 'Colheita' : 'Condução', qualityScore: Number(row.nota_qualidade ?? 0) || undefined, qualityClass: String(row.classificacao ?? '') || undefined }; });
@@ -712,8 +633,8 @@ export default function Home() {
       return { id: Date.now() + index, date: formatDate(date(row.data_realizada)), trial: clean(row.ensaio_codigo), type: stage, stream, owner: clean(row.responsavel) || 'Equipe de campo', notes: clean(row.observacoes) || 'Registro importado da planilha unificada', plannedId: clean(row.visita_codigo), qualityScore, qualityClass: clean(row.classificacao) || (qualityScore >= 85 ? 'Excelente' : qualityScore >= 70 ? 'Adequado' : qualityScore >= 50 ? 'Atenção' : 'Crítico'), locationId: clean(row.local_codigo), macroGroup: (clean(row.grupo) || 'Outro') as MacroGroup, macroStage: (/semeadura/i.test(stage) ? 'Semeadura' : /maturidade|colheita/i.test(stage) ? 'Colheita' : 'Condução') as MacroStage, checks: clean(row.checklist_concluido) ? [clean(row.checklist_concluido)] : [], photos: clean(row.fotos) ? clean(row.fotos).split(/[;,]/).map((item) => item.trim()).filter(Boolean) : [], details: { fluxo: stream, estabelecimento: clean(row.estabelecimento_nota), uniformidade: clean(row.uniformidade_nota), daninhas: clean(row.daninhas_nota), controle_daninhas: clean(row.controle_daninhas), oidio: clean(row.oidio_nota), ferrugem: clean(row.ferrugem_nota), manchas: clean(row.manchas_nota), qualidade_grupo: clean(row.qualidade_grupo_nota) } };
     });
     importedLocations.forEach((location) => { const localTrials = importedTrials.filter((trial) => trial.locationId === location.id); location.trials = localTrials.length; location.plots = localTrials.reduce((sum, trial) => sum + trial.plots, 0); });
-    locations.splice(0, locations.length, ...importedLocations);
-    trials.splice(0, trials.length, ...importedTrials);
+    setLocations(importedLocations);
+    setTrials(importedTrials);
     setRegisteredTrials([]); setSchedule(importedSchedule); setActivities(importedActivities);
     if (importedTrials[0]) setSelectedTrial(importedTrials[0]);
     localStorage.setItem('field-wheat-locations-clean-v1', JSON.stringify(importedLocations));
@@ -724,7 +645,7 @@ export default function Home() {
     localStorage.setItem('field-wheat-unified-source-v1', JSON.stringify(rows));
     const updatedAt = persistHarvestSnapshot({ locations: importedLocations, trials: importedTrials, schedule: importedSchedule, activities: importedActivities, source: rows });
     touchHarvest(updatedAt, importedActivities);
-    setDataVersion((value) => value + 1);
+
     setToast(`${importedLocations.length} locais, ${importedTrials.length} ensaios e ${importedSchedule.length} atividades previstas carregados.`);
     setTimeout(() => setToast(''), 4500);
   }
@@ -744,45 +665,20 @@ export default function Home() {
   }
 
   function finalizeLayoutPlanning(payload: LayoutFinalization) {
-    if (activeHarvest?.status === 'Encerrada') { setToast('Safra encerrada. Reabra-a antes de finalizar uma implantação.'); return; }
-    const locationCity = /\s-\s[A-Z]{2}$/.test(payload.location.city) ? payload.location.city : `${payload.location.city} - RS`;
-    const nextLocation: NetworkLocation = { id: payload.location.id, name: payload.location.name, city: locationCity, program: (programId === 'Brasil' ? 'U' : programId) as 'U' | 'K' | 'X', region: rhaCode(payload.location.rha || payload.location.region), rha: rhaCode(payload.location.rha || payload.location.region), lat: payload.location.lat, lng: payload.location.lng, trials: payload.allocations.length, plots: payload.allocations.reduce((sum, allocation) => sum + allocation.plotCount, 0), status: 'ok' };
-    const areaText = payload.areaType.toLowerCase();
-    const group: MacroGroup = areaText.includes('cole') ? 'Coleção' : areaText.includes('founder') ? 'Founder' : /^pd/.test(areaText) ? 'PD' : areaText.includes('multi') ? 'Multiqualidades' : areaText.includes('outro') ? 'Outro' : 'Ensaios';
-    const year = Number(payload.plannedSowingDate.slice(0, 4)) || new Date().getFullYear();
-    const impactKinds = new Set(['Linha entupida','Falha de semeadura','Passada de pulverizador','Fitotoxidez','Parcela perdida']);
-    const createdTrials: Trial[] = payload.allocations.map((allocation) => {
-      const allocationPlots = payload.plots.filter((plot) => plot.allocationId === allocation.id || plot.trialId === allocation.id);
-      const affectedPlots = allocationPlots.filter((plot) => impactKinds.has(payload.plotIssues[plot.plotId]?.kind)).map((plot) => plot.plotId);
-      const lostPlots = allocationPlots.filter((plot) => payload.plotIssues[plot.plotId]?.kind === 'Parcela perdida').map((plot) => plot.plotId);
-      const affectedRatio = affectedPlots.length / Math.max(allocation.plotCount, 1);
-      const layoutPenalty = affectedRatio <= .1 ? 0 : Math.min(40, Math.round((affectedRatio - .1) * 50));
-      return { id: `${allocation.id}-${nextLocation.id}-${payload.mapId}`, name: allocation.name, type: group, subtype: payload.areaType, areaCategory: payload.areaType, mapId: payload.mapId, year, cycle: activeHarvest?.name ?? `Safra ${year}`, locationId: nextLocation.id, plots: allocation.plotCount, sowing: payload.plannedSowingDate, harvest: addDays(payload.plannedSowingDate, 120), owner: 'Wheat Team', rawStatus: 'Planejado', priority: 'Normal', notes: `Criado pelo ${payload.mapName} · ${payload.fileName}`, place: nextLocation.name, city: nextLocation.city, status: 'Planejado', progress: 0, next: 'Semeadura', nextDate: payload.plannedSowingDate, date: formatDate(payload.plannedSowingDate), fieldName: payload.mapName, issueCount: affectedPlots.length, affectedPlots, lostPlots, layoutPenalty };
-    });
-    const selectedTemplates = activityTemplates.filter((template) => template.enabled && (template.categories.includes(payload.areaType) || template.categories.includes('*')));
-    const representativeTrial = createdTrials[0];
-    const createdSchedule: PlannedActivity[] = representativeTrial ? selectedTemplates.map((template) => { const plannedDate = addDays(payload.plannedSowingDate, template.offset); return { id: `${nextLocation.id}-${payload.mapId}-${template.id}`, trialId: representativeTrial.id, locationId: nextLocation.id, areaCategory: payload.areaType, activityTemplateId: template.id, activity: template.name, category: template.stage, start: plannedDate, end: plannedDate, owner: 'Wheat Team', priority: 'Normal', status: 'Não iniciado', notes: `Atividade da categoria ${payload.areaType} · ${payload.mapName}`, originalStart: plannedDate, originalEnd: plannedDate, version: 1 }; }) : [];
-    const previousLocationTrialIds = new Set(allTrials.filter((trial) => trial.locationId === nextLocation.id && trial.mapId === payload.mapId).map((trial) => trial.id));
-    const trialIds = new Set(createdTrials.map((trial) => trial.id));
-    const removedTrialIds = new Set([...previousLocationTrialIds].filter((id) => !trialIds.has(id)));
-    const nextTrials = [...allTrials.filter((trial) => !(trial.locationId === nextLocation.id && trial.mapId === payload.mapId)), ...createdTrials];
-    const nextSchedule = [...schedule.filter((item) => !(item.locationId === nextLocation.id && item.areaCategory === payload.areaType && item.id.includes(payload.mapId)) && !previousLocationTrialIds.has(item.trialId)), ...createdSchedule];
-    const nextActivities = activities.filter((item) => !removedTrialIds.has(item.trial));
-    const nextLocations = [...locations.filter((item) => item.id !== nextLocation.id), { ...nextLocation, trials: nextTrials.filter((trial) => trial.locationId === nextLocation.id).length, plots: nextTrials.filter((trial) => trial.locationId === nextLocation.id).reduce((sum, trial) => sum + trial.plots, 0) }];
-    const existingSource = JSON.parse(localStorage.getItem('field-wheat-unified-source-v1') ?? '[]') as Record<string, unknown>[];
-    const nextRows = payload.allocations.flatMap((allocation) => { const trialId = `${allocation.id}-${nextLocation.id}-${payload.mapId}`; return selectedTemplates.map((template) => ({ safra: activeHarvest?.name, programa: nextLocation.program, tipo_registro: 'Croqui de implantação', mapa_id: payload.mapId, mapa_nome: payload.mapName, local_codigo: nextLocation.id, local_nome: nextLocation.name, municipio: payload.location.city, latitude: nextLocation.lat, longitude: nextLocation.lng, tipo_area: payload.areaType, arquivo_croqui: payload.fileName, ensaio_codigo: trialId, ensaio_nome: allocation.name, codigo_alocacao: allocation.code, cor_ensaio: allocation.color, parcela_inicial: allocation.startPlotId, parcela_final: allocation.endPlotId, parcelas: allocation.plotCount, primeira_parcela_latitude: allocation.firstPlotCoordinate[0], primeira_parcela_longitude: allocation.firstPlotCoordinate[1], data_semeadura_prevista: payload.plannedSowingDate, visita_codigo: `${nextLocation.id}-${payload.mapId}-${template.id}`, atividade_descricao: template.name, estadio_fenologico: template.stage, data_prevista: addDays(payload.plannedSowingDate, template.offset), status_planejamento: 'Não iniciado' })); });
-    const nextSource = [...existingSource.filter((row) => !(String(row.local_codigo) === nextLocation.id && String(row.mapa_id) === payload.mapId)), ...nextRows];
-    locations.splice(0, locations.length, ...nextLocations); trials.splice(0, trials.length, ...nextTrials); setRegisteredTrials([]); setSchedule(nextSchedule); setActivities(nextActivities);
-    localStorage.setItem('field-wheat-locations-clean-v1', JSON.stringify(nextLocations)); localStorage.setItem('field-wheat-imported-trials-clean-v1', JSON.stringify(nextTrials)); localStorage.setItem('field-wheat-schedule-clean-v1', JSON.stringify(nextSchedule)); localStorage.setItem('field-wheat-activities-clean-v1', JSON.stringify(nextActivities)); localStorage.setItem('field-wheat-unified-source-v1', JSON.stringify(nextSource));
-    const updatedAt = persistHarvestSnapshot({ locations: nextLocations, trials: nextTrials, schedule: nextSchedule, activities: nextActivities, source: nextSource }); touchHarvest(updatedAt, nextActivities); setDataVersion((value) => value + 1); setToast(`${payload.mapName}: ${createdTrials.length} ensaio(s) e ${createdSchedule.length} atividades por categoria programadas.`); setTimeout(() => setToast(''), 4500);
+    if (activeHarvest?.status === 'Encerrada') throw new Error('Safra encerrada. Reabra-a antes de salvar o croqui.');
+    const current: HarvestSnapshot = { locations, trials: allTrials, schedule, activities, source: readJson('field-wheat-unified-source-v1', []), updatedAt: lastUpdated };
+    const snapshot = buildFieldPlanning(payload, current, activityTemplates, { program: (programId === 'Brasil' ? 'U' : programId) as 'U' | 'K' | 'X', rha: rhaCode(payload.location.rha || payload.location.region), harvestName: activeHarvest?.name ?? '' });
+    const nextHarvests = saveHarvestBundle(activeHarvestId, snapshot, harvests, payload.storageUpdates);
+    setLocations(snapshot.locations); setTrials(snapshot.trials); setRegisteredTrials([]); setSchedule(snapshot.schedule); setActivities(snapshot.activities); setHarvests(nextHarvests); setLastUpdated(snapshot.updatedAt);
+    setToast('Mapa, ensaios e planejamento salvos.'); setTimeout(() => setToast(''), 4500);
   }
 
   function addManagedLocation(input: { code: string; name: string; city: string; uf: string; region: string; lat: number; lng: number }) {
     if (activeHarvest?.status === 'Encerrada') { setToast('Safra encerrada. Reabra-a para editar cadastros.'); return; }
     const nextLocation: NetworkLocation = { id: input.code.trim().toUpperCase(), name: input.name.trim(), city: `${input.city.trim()} - ${input.uf.trim().toUpperCase()}`, program: (programId === 'Brasil' ? 'U' : programId) as 'U' | 'K' | 'X', region: rhaCode(input.region), rha: rhaCode(input.region), lat: input.lat || -29.63, lng: input.lng || -53.05, trials: 0, plots: 0, status: 'ok' };
-    const nextLocations = [...locations.filter((item) => item.id !== nextLocation.id), nextLocation]; locations.splice(0, locations.length, ...nextLocations); localStorage.setItem('field-wheat-locations-clean-v1', JSON.stringify(nextLocations));
+    const nextLocations = [...locations.filter((item) => item.id !== nextLocation.id), nextLocation]; setLocations(nextLocations); localStorage.setItem('field-wheat-locations-clean-v1', JSON.stringify(nextLocations));
     const source = JSON.parse(localStorage.getItem('field-wheat-unified-source-v1') ?? '[]') as Record<string, unknown>[]; const nextSource = [...source.filter((row) => String(row.local_codigo) !== nextLocation.id || row.ensaio_codigo), { safra: activeHarvest?.name, programa: nextLocation.program, local_codigo: nextLocation.id, local_nome: nextLocation.name, municipio: input.city, uf: input.uf.toUpperCase(), latitude: nextLocation.lat, longitude: nextLocation.lng, rha_regiao: rhaLabel(nextLocation.rha), tipo_registro: 'Localidade' }]; localStorage.setItem('field-wheat-unified-source-v1', JSON.stringify(nextSource));
-    const updatedAt = persistHarvestSnapshot({ locations: nextLocations, source: nextSource }); touchHarvest(updatedAt); setDataVersion((value) => value + 1); setToast(`${nextLocation.name} adicionada à ${activeHarvest?.name}.`); setTimeout(() => setToast(''), 3500);
+    const updatedAt = persistHarvestSnapshot({ locations: nextLocations, source: nextSource }); touchHarvest(updatedAt);  setToast(`${nextLocation.name} adicionada à ${activeHarvest?.name}.`); setTimeout(() => setToast(''), 3500);
   }
 
   function addManagedTrials(input: { locationIds: string[]; trialCode: string; trialName: string; group: MacroGroup; subtype: string; fieldCode: string; fieldName: string; plots: number; sowing: string; owner: string; priority: string }) {
@@ -792,7 +688,7 @@ export default function Home() {
     input.locationIds.forEach((locationId) => { const location = locations.find((item) => item.id === locationId); if (!location) return; const id = `${input.trialCode.trim().toUpperCase()}-${locationId}`; const trial: Trial = { id, name: input.trialName.trim(), type: input.group, subtype: input.group === 'Ensaios' ? input.subtype : '', year: Number(input.sowing.slice(0,4)) || 2026, cycle: activeHarvest?.name ?? 'Safra', locationId, plots: input.plots, sowing: input.sowing, harvest: addDays(input.sowing,120), owner: input.owner, rawStatus: 'Planejado', priority: input.priority, notes: 'Cadastro realizado no Gerenciamento', place: location.name, city: location.city, status: 'Planejado', progress: 0, next: 'Semeadura', nextDate: input.sowing, date: formatDate(input.sowing), fieldName: input.fieldName };
       createdTrials.push(trial); stages.forEach(([stage, offset], index) => { const plannedDate = addDays(input.sowing, offset); const visitId = `${id}-V${index + 1}`; createdSchedule.push({ id: visitId, trialId: id, activity: `Visita · ${stage}`, category: stage, start: plannedDate, end: plannedDate, owner: input.owner, priority: input.priority, status: 'Não iniciado', notes: 'Gerado automaticamente pelo cadastro administrativo', originalStart: plannedDate, originalEnd: plannedDate, version: 1 }); createdRows.push({ safra: activeHarvest?.name, local_codigo: location.id, local_nome: location.name, municipio: location.city.split(' - ')[0], uf: location.city.split(' - ')[1] ?? '', latitude: location.lat, longitude: location.lng, vcu_regiao: location.region.replace('_1',' I').replace('_2',' II').replace('_3',' III'), campo_codigo: input.fieldCode, campo_nome: input.fieldName, ensaio_codigo: id, ensaio_nome: input.trialName, grupo: input.group, subtipo_ensaio: input.group === 'Ensaios' ? input.subtype : '', parcelas: input.plots, data_semeadura: input.sowing, visita_codigo: visitId, atividade_descricao: `Visita · ${stage}`, estadio_fenologico: stage, data_prevista: plannedDate, responsavel: input.owner, prioridade: input.priority, status_planejamento: 'Não iniciado' }); }); });
     const nextTrials = [...allTrials.filter((item) => !createdTrials.some((created) => created.id === item.id)), ...createdTrials]; const nextSchedule = [...schedule.filter((item) => !createdSchedule.some((created) => created.id === item.id)), ...createdSchedule]; const existingSource = JSON.parse(localStorage.getItem('field-wheat-unified-source-v1') ?? '[]') as Record<string, unknown>[]; const visitIds = new Set(createdRows.map((row) => String(row.visita_codigo))); const nextSource = [...existingSource.filter((row) => !visitIds.has(String(row.visita_codigo))), ...createdRows];
-    trials.splice(0, trials.length, ...nextTrials); setRegisteredTrials([]); setSchedule(nextSchedule); localStorage.setItem('field-wheat-imported-trials-clean-v1', JSON.stringify(nextTrials)); localStorage.setItem('field-wheat-schedule-clean-v1', JSON.stringify(nextSchedule)); localStorage.setItem('field-wheat-unified-source-v1', JSON.stringify(nextSource)); const nextLocations = locations.map((location) => ({ ...location, trials: nextTrials.filter((trial) => trial.locationId === location.id).length, plots: nextTrials.filter((trial) => trial.locationId === location.id).reduce((sum, trial) => sum + trial.plots, 0) })); locations.splice(0, locations.length, ...nextLocations); const updatedAt = persistHarvestSnapshot({ locations: nextLocations, trials: nextTrials, schedule: nextSchedule, source: nextSource }); touchHarvest(updatedAt); setDataVersion((value) => value + 1); setToast(`${createdTrials.length} ensaio(s) e ${createdSchedule.length} visitas adicionados.`); setTimeout(() => setToast(''), 4000);
+    setTrials(nextTrials); setRegisteredTrials([]); setSchedule(nextSchedule); localStorage.setItem('field-wheat-imported-trials-clean-v1', JSON.stringify(nextTrials)); localStorage.setItem('field-wheat-schedule-clean-v1', JSON.stringify(nextSchedule)); localStorage.setItem('field-wheat-unified-source-v1', JSON.stringify(nextSource)); const nextLocations = locations.map((location) => ({ ...location, trials: nextTrials.filter((trial) => trial.locationId === location.id).length, plots: nextTrials.filter((trial) => trial.locationId === location.id).reduce((sum, trial) => sum + trial.plots, 0) })); setLocations(nextLocations); const updatedAt = persistHarvestSnapshot({ locations: nextLocations, trials: nextTrials, schedule: nextSchedule, source: nextSource }); touchHarvest(updatedAt);  setToast(`${createdTrials.length} ensaio(s) e ${createdSchedule.length} visitas adicionados.`); setTimeout(() => setToast(''), 4000);
   }
 
   function reportImplementationIssue(input: { locationId: string; trialId: string; plotIds: string[]; category: string; description: string }) {
@@ -804,7 +700,7 @@ export default function Home() {
     const nextTrials = allTrials.map((trial) => trial.id === target.id ? updatedTrial : trial);
     const alert: Activity = { id: Date.now(), date: new Date().toLocaleDateString('pt-BR'), trial: target.id, type: 'Problema de implantação', stream: 'field', owner: currentUser?.name ?? 'Equipe', notes: input.description, locationId: input.locationId, scope: 'Ensaio específico', macroGroup: macroGroupFor(target), macroStage: 'Semeadura', alertCategory: input.category, qualityPenalty: adversePenalty(input.category, input.plotIds.length), plotIds: input.plotIds, details: { ocorrencia: input.description, origem: 'Gerenciamento · implantação' } };
     const nextActivities = [alert, ...activities];
-    trials.splice(0, trials.length, ...nextTrials); setRegisteredTrials([]); setActivities(nextActivities); setDataVersion((value) => value + 1);
+    setTrials(nextTrials); setRegisteredTrials([]); setActivities(nextActivities);
     localStorage.setItem('field-wheat-imported-trials-clean-v1', JSON.stringify(nextTrials)); localStorage.setItem('field-wheat-trials-clean-v1', '[]'); localStorage.setItem('field-wheat-activities-clean-v1', JSON.stringify(nextActivities));
     const catalogKey = `field-wheat-layout-catalog-${activeHarvestId}-${input.locationId}`;
     try { const catalog = parseLayout<Array<Record<string, any>>>(localStorage.getItem(catalogKey) ?? '[]'); const updatedCatalog = catalog.map((snapshot) => snapshot.metadata?.mapId === target.mapId ? { ...snapshot, plotIssues: { ...(snapshot.plotIssues ?? {}), ...Object.fromEntries(input.plotIds.map((plotId) => [plotId, { kind: input.category, note: input.description, replacementGenotype: '', updatedAt: new Date().toISOString() }])) }, savedAt: new Date().toISOString() } : snapshot); localStorage.setItem(catalogKey, stringifyLayout(updatedCatalog)); const legacyKey = `field-wheat-layout-${activeHarvestId}-${input.locationId}`; const activeSnapshot = updatedCatalog.find((snapshot) => snapshot.metadata?.mapId === target.mapId); if (activeSnapshot) localStorage.removeItem(legacyKey); } catch { /* preserva o reporte mesmo quando o croqui legado não está disponível */ }
@@ -813,30 +709,35 @@ export default function Home() {
   }
 
   function deleteManagedTrial(trialId: string) {
-    if (activeHarvest?.status === 'Encerrada') { setToast('Safra encerrada. Reabra-a para excluir ensaios.'); return; }
+    if (activeHarvest?.status === 'Encerrada') { setToast('Reabra a safra para excluir ensaios.'); return; }
+    const target = allTrials.find((trial) => trial.id === trialId); if (!target) return;
     const nextTrials = allTrials.filter((trial) => trial.id !== trialId);
-    const nextSchedule = schedule.filter((item) => item.trialId !== trialId);
-    const nextActivities = activities.filter((item) => item.trial !== trialId);
+    const fallback = nextTrials.find((trial) => trial.locationId === target.locationId && trial.mapId === target.mapId && trial.areaCategory === target.areaCategory);
+    const nextSchedule = schedule.filter((plan) => plan.trialId !== trialId || Boolean(fallback)).map((plan) => plan.trialId === trialId && fallback ? { ...plan, trialId: fallback.id } : plan);
+    const nextActivities = activities.filter((activity) => activity.trial !== trialId || Boolean(fallback && activity.scope !== 'Ensaio específico')).map((activity) => activity.trial === trialId && fallback ? { ...activity, trial: fallback.id } : activity);
     const nextLocations = locations.map((location) => ({ ...location, trials: nextTrials.filter((trial) => trial.locationId === location.id).length, plots: nextTrials.filter((trial) => trial.locationId === location.id).reduce((sum, trial) => sum + trial.plots, 0) }));
-    const source = JSON.parse(localStorage.getItem('field-wheat-unified-source-v1') ?? '[]') as Record<string, unknown>[];
-    const nextSource = source.filter((row) => String(row.ensaio_codigo ?? '') !== trialId);
-    trials.splice(0, trials.length, ...nextTrials); locations.splice(0, locations.length, ...nextLocations); setRegisteredTrials([]); setSchedule(nextSchedule); setActivities(nextActivities);
-    localStorage.setItem('field-wheat-imported-trials-clean-v1', JSON.stringify(nextTrials)); localStorage.setItem('field-wheat-trials-clean-v1', '[]'); localStorage.setItem('field-wheat-locations-clean-v1', JSON.stringify(nextLocations)); localStorage.setItem('field-wheat-schedule-clean-v1', JSON.stringify(nextSchedule)); localStorage.setItem('field-wheat-activities-clean-v1', JSON.stringify(nextActivities)); localStorage.setItem('field-wheat-unified-source-v1', JSON.stringify(nextSource));
-    const updatedAt = persistHarvestSnapshot({ locations: nextLocations, trials: nextTrials, schedule: nextSchedule, activities: nextActivities, source: nextSource }); touchHarvest(updatedAt, nextActivities); setDataVersion((value) => value + 1); setToast('Ensaio excluído do planejamento, dos registros e da base de gestão.'); setTimeout(() => setToast(''), 3500);
+    try {
+      const catalogKey = 'field-wheat-layout-catalog-' + activeHarvestId + '-' + target.locationId;
+      const catalog = parseLayout<LayoutSnapshot[]>(localStorage.getItem(catalogKey) ?? '[]');
+      const updatedCatalog = catalog.map((snapshot) => {
+        if (snapshot.metadata?.mapId !== target.mapId) return snapshot;
+        const removed = new Set((snapshot.allocations ?? []).filter((allocation) => allocation.name === target.name || allocation.id + '-' + target.locationId + '-' + target.mapId === trialId).map((allocation) => allocation.id));
+        return { ...snapshot, allocations: snapshot.allocations?.filter((allocation) => !removed.has(allocation.id)), plots: snapshot.plots?.map((plot) => removed.has(plot.allocationId ?? plot.trialId) ? { ...plot, trialId: 'UNASSIGNED', allocationId: undefined } : plot) ?? null };
+      });
+      const snapshot: HarvestSnapshot = { locations: nextLocations, trials: nextTrials, schedule: nextSchedule, activities: nextActivities, source: readJson<Record<string, unknown>[]>('field-wheat-unified-source-v1', []).filter((row) => String(row.ensaio_codigo ?? '') !== trialId), updatedAt: new Date().toISOString() };
+      const nextHarvests = saveHarvestBundle(activeHarvestId, snapshot, harvests, { [catalogKey]: stringifyLayout(updatedCatalog), ['field-wheat-layout-' + activeHarvestId + '-' + target.locationId]: null });
+      setTrials(nextTrials); setLocations(nextLocations); setRegisteredTrials([]); setSchedule(nextSchedule); setActivities(nextActivities); setHarvests(nextHarvests); setLastUpdated(snapshot.updatedAt); setToast('Ensaio removido. As parcelas ficaram livres no croqui para nova alocação.');
+    } catch (error) { setToast(error instanceof Error ? error.message : 'Não foi possível excluir o ensaio.'); }
   }
 
   function deleteManagedLocation(locationId: string) {
-    if (activeHarvest?.status === 'Encerrada') { setToast('Safra encerrada. Reabra-a para excluir locais.'); return; }
-    const removedTrialIds = new Set(allTrials.filter((trial) => trial.locationId === locationId).map((trial) => trial.id));
-    const nextTrials = allTrials.filter((trial) => trial.locationId !== locationId);
-    const nextSchedule = schedule.filter((item) => !removedTrialIds.has(item.trialId));
-    const nextActivities = activities.filter((item) => item.locationId !== locationId && !removedTrialIds.has(item.trial));
-    const nextLocations = locations.filter((location) => location.id !== locationId);
-    const source = JSON.parse(localStorage.getItem('field-wheat-unified-source-v1') ?? '[]') as Record<string, unknown>[];
-    const nextSource = source.filter((row) => String(row.local_codigo ?? '') !== locationId);
-    trials.splice(0, trials.length, ...nextTrials); locations.splice(0, locations.length, ...nextLocations); setRegisteredTrials([]); setSchedule(nextSchedule); setActivities(nextActivities);
-    localStorage.removeItem(`field-wheat-layout-${activeHarvestId}-${locationId}`); localStorage.setItem('field-wheat-imported-trials-clean-v1', JSON.stringify(nextTrials)); localStorage.setItem('field-wheat-trials-clean-v1', '[]'); localStorage.setItem('field-wheat-locations-clean-v1', JSON.stringify(nextLocations)); localStorage.setItem('field-wheat-schedule-clean-v1', JSON.stringify(nextSchedule)); localStorage.setItem('field-wheat-activities-clean-v1', JSON.stringify(nextActivities)); localStorage.setItem('field-wheat-unified-source-v1', JSON.stringify(nextSource));
-    const updatedAt = persistHarvestSnapshot({ locations: nextLocations, trials: nextTrials, schedule: nextSchedule, activities: nextActivities, source: nextSource }); touchHarvest(updatedAt, nextActivities); setDataVersion((value) => value + 1); setToast('Local e dados vinculados excluídos.'); setTimeout(() => setToast(''), 3500);
+    if (activeHarvest?.status === 'Encerrada') { setToast('Reabra a safra para excluir locais.'); return; }
+    const removed = new Set(allTrials.filter((trial) => trial.locationId === locationId).map((trial) => trial.id));
+    const snapshot: HarvestSnapshot = { locations: locations.filter((location) => location.id !== locationId), trials: allTrials.filter((trial) => trial.locationId !== locationId), schedule: schedule.filter((plan) => plan.locationId !== locationId && !removed.has(plan.trialId)), activities: activities.filter((activity) => activity.locationId !== locationId && !removed.has(activity.trial)), source: readJson<Record<string, unknown>[]>('field-wheat-unified-source-v1', []).filter((row) => String(row.local_codigo ?? '') !== locationId), updatedAt: new Date().toISOString() };
+    try {
+      const nextHarvests = saveHarvestBundle(activeHarvestId, snapshot, harvests, { ['field-wheat-layout-' + activeHarvestId + '-' + locationId]: null, ['field-wheat-layout-catalog-' + activeHarvestId + '-' + locationId]: null });
+      setLocations(snapshot.locations); setTrials(snapshot.trials); setRegisteredTrials([]); setSchedule(snapshot.schedule); setActivities(snapshot.activities); setHarvests(nextHarvests); setLastUpdated(snapshot.updatedAt); setToast('Local e croquis vinculados removidos.');
+    } catch (error) { setToast(error instanceof Error ? error.message : 'Não foi possível excluir o local.'); }
   }
 
   function saveFieldTrial(event: FormEvent<HTMLFormElement>) {
@@ -1025,12 +926,12 @@ function PageHead({ eyebrow, title, copy, action }: { eyebrow: string; title: st
   return <div className="page-head"><div><span className="eyebrow">{eyebrow}</span><h1>{title}</h1><p>{copy}</p></div>{action}</div>;
 }
 
-function Dashboard({ trialList, activities, schedule, harvests, activeHarvestId, onHarvest, onNavigate, onFilter, onTrial }: { trialList: Trial[]; activities: Activity[]; schedule: PlannedActivity[]; harvests: Harvest[]; activeHarvestId: string; onHarvest: (id: string) => void; onNavigate: (s: Screen) => void; onFilter: (context: ViewContext) => void; onTrial: (trial: Trial) => void }) {
+function Dashboard({ trialList, activities, schedule, harvests, activeHarvestId, onHarvest, onTrial }: { trialList: Trial[]; activities: Activity[]; schedule: PlannedActivity[]; harvests: Harvest[]; activeHarvestId: string; onHarvest: (id: string) => void; onNavigate: (s: Screen) => void; onFilter: (context: ViewContext) => void; onTrial: (trial: Trial) => void }) {
   const locations = useContext(ProgramLocations) ?? baseLocations;
   const [qualityOpen, setQualityOpen] = useState(false);
   const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' });
-  const applies = (activity: Activity, trial: Trial) => activity.trial === trial.id || activity.locationId === trial.locationId && (activity.scope === 'Área total' || activity.scope === 'Local inteiro' || activity.details?.categoria_area === (trial.areaCategory ?? trial.type));
-  const harvested = (trial: Trial) => activities.some((activity) => activity.stream === 'operational' && activity.macroStage === 'Colheita' && activity.details?.condicao_operacao !== 'Não executado' && applies(activity, trial));
+  const applies = activityAppliesToTrial;
+  const harvested = (trial: Trial) => isTrialHarvested(trial, activities, schedule);
   const planted = trialList.filter((trial) => Boolean(actualSowingDate(trial, activities, schedule)));
   const harvestedCount = trialList.filter(harvested).length;
   const conducting = planted.filter((trial) => !harvested(trial));
@@ -1142,7 +1043,7 @@ function TrialsScreen({ trialList, activities, schedule, context, onClearContext
   const fieldIsLate = (trial: Trial) => {
     const field = trial.fieldName || trial.locationId;
     const fieldTrialIds = new Set(trialList.filter((item) => (item.fieldName || item.locationId) === field).map((item) => item.id));
-    return schedule.some((item) => fieldTrialIds.has(item.trialId) && item.start < sourceSummary.importedAt && item.status !== 'Concluído');
+    return schedule.some((item) => fieldTrialIds.has(item.trialId) && item.start < todayIso() && item.status !== 'Concluído');
   };
   const filtered = trialList.filter((trial) => {
     const quality = trialQuality(trial, activities);
@@ -1158,7 +1059,7 @@ function TrialsScreen({ trialList, activities, schedule, context, onClearContext
   </>;
 }
 
-function PlanningScreen({ trialList, schedule, weatherConditions, onActivity, onReprogram }: { trialList: Trial[]; schedule: PlannedActivity[]; weatherConditions: LocationWeather[]; onActivity: (item: PlannedActivity) => void; onReprogram: (trialId: string, date: string) => void }) {
+function PlanningScreen({ trialList, schedule, onActivity, onReprogram }: { trialList: Trial[]; schedule: PlannedActivity[]; weatherConditions: LocationWeather[]; onActivity: (item: PlannedActivity) => void; onReprogram: (trialId: string, date: string) => void }) {
   const locations = useContext(ProgramLocations) ?? baseLocations;
   const calendarToday = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' });
   const [month, setMonth] = useState(() => { const date = new Date(`${calendarToday}T12:00:00`); return date.getFullYear() * 12 + date.getMonth(); });
@@ -1183,30 +1084,6 @@ function PlanningScreen({ trialList, schedule, weatherConditions, onActivity, on
     <section className="mobile-planning-list">{upcoming.map((item) => { const location = locations.find((entry) => entry.id === item.locationId) ?? locations.find((entry) => trialList.find((trial) => trial.id === item.trialId)?.locationId === entry.id); return <article className="card" key={`mobile-${item.id}`}><span><small>{item.areaCategory ?? 'Área'} · {formatDate(item.start)}</small><b>{item.activity}</b><em>{location?.name}</em></span><div>{location && <><a href={`https://www.google.com/maps/dir/?api=1&destination=${location.lat},${location.lng}`} target="_blank" rel="noreferrer">Ir para área</a><a href={`https://www.waze.com/ul?ll=${location.lat},${location.lng}&navigate=yes`} target="_blank" rel="noreferrer">Waze</a></>}<button onClick={() => onActivity(item)}>Registrar</button></div></article>; })}</section>
     <section className="card calendar-card"><header><button onClick={() => setMonth((value) => value - 1)}>‹</button><h2>{monthLabel}</h2><button onClick={() => setMonth((value) => value + 1)}>›</button></header><div className="calendar-weekdays">{['SEG','TER','QUA','QUI','SEX','SÁB','DOM'].map((day) => <b key={day}>{day}</b>)}</div><div className="calendar-grid">{days.map((date) => { const iso = date.toISOString().slice(0, 10); const dayEvents = events.filter((item) => item.start === iso).slice(0, 4); return <div className={`calendar-day ${date.getMonth() !== monthDate.getMonth() ? 'outside' : ''} ${iso === calendarToday ? 'today' : ''}`} key={iso}><span>{date.getDate()}</span>{dayEvents.map((item) => { const trial = trialList.find((entry) => entry.id === item.trialId); const location = locations.find((entry) => entry.id === (item.locationId ?? trial?.locationId)); const trialTypes = [...new Set(trialList.filter((entry) => entry.locationId === location?.id && (entry.areaCategory ?? entry.type) === (item.areaCategory ?? trial?.areaCategory ?? trial?.type)).map((entry) => entry.areaCategory ?? entry.type))]; return <button key={item.id} className={`calendar-event ${activityStreamFor(item)} ${item.status === 'Concluído' ? 'done' : item.version > 1 ? 'revised' : ''}`} onClick={() => onActivity(item)} title={`${location?.name ?? 'Local'} · ${item.activity} · ${trialTypes.join(', ')}`}><b>{item.activity}</b><small>◎ {location?.name ?? 'Local não informado'}</small><em>{trialTypes.join(', ') || item.areaCategory || trial?.type || 'Ensaios'}</em></button>; })}</div>; })}</div></section>
     <section className="card reprogram-panel"><div><span className="eyebrow">AUTOMAÇÃO SIMULADA</span><h2>Atualizar pela semeadura real</h2><p>As atividades ainda abertas são reposicionadas pelo mesmo número de dias, mantendo a data original e a versão do cronograma.</p></div><div className="reprogram-fields"><label>Ensaio<select value={reprogramTrial} onChange={(event) => { const id = event.target.value; setReprogramTrial(id); setActualSowing(trialList.find((trial) => trial.id === id)?.sowing ?? ''); }}>{trialList.map((trial) => <option key={trial.id}>{trial.id}</option>)}</select></label><label>Semeadura real<input type="date" value={actualSowing} onChange={(event) => setActualSowing(event.target.value)} /></label><button className="primary-button" onClick={() => onReprogram(reprogramTrial, actualSowing)}>Recalcular cronograma</button></div></section>
-  </>;
-}
-
-function ActivityForm({ trialList, onSave, defaultTrial, selectedPlan }: { trialList: Trial[]; onSave: (event: FormEvent<HTMLFormElement>) => void; defaultTrial: string; selectedPlan: PlannedActivity | null }) {
-  const locations = useContext(ProgramLocations) ?? baseLocations;
-  const defaultLocation = trialList.find((trial) => trial.id === (selectedPlan?.trialId ?? defaultTrial))?.locationId ?? locations[0].id;
-  const [locationId, setLocationId] = useState(defaultLocation);
-  const [scope, setScope] = useState<'Área total' | 'Grupo específico'>('Grupo específico');
-  const [macroGroup, setMacroGroup] = useState<MacroGroup>(macroGroupFor(trialList.find((trial) => trial.id === (selectedPlan?.trialId ?? defaultTrial)) ?? trialList[0]));
-  const [macroStage, setMacroStage] = useState<MacroStage>(selectedPlan?.category === 'Colheita' ? 'Colheita' : /seme|implanta|identifica|etiqueta/i.test(`${selectedPlan?.activity ?? ''} ${selectedPlan?.category ?? ''}`) ? 'Semeadura' : 'Condução');
-  const [quality, setQuality] = useState({ uniformity: 4, weeds: 2, disease: 2 });
-  const [photoNames, setPhotoNames] = useState<string[]>([]);
-  const score = qualityFrom(quality);
-  const checks: Record<MacroStage, string[]> = {
-    Semeadura: ['Área e solo conferidos', 'Sementes e tratamentos conferidos', 'Regulagem e profundidade verificadas', 'Identificação e croqui instalados'],
-    Condução: ['Estádio fenológico confirmado', 'Daninhas avaliadas', 'Pragas e doenças avaliadas', 'Manejo executado conforme protocolo', 'Fotos gerais e de detalhe registradas'],
-    Colheita: ['Umidade e maturação conferidas', 'Parcelas aptas demarcadas', 'Equipamento limpo e regulado', 'Pesagem e identificação conferidas'],
-  };
-  return <><PageHead eyebrow="Diário de campo · Fluxo macro" title="Registrar atividade" copy="Escolha o local, defina a abrangência e conclua os checks operacionais com evidências." />
-    <form className="activity-layout" onSubmit={onSave}>{selectedPlan && <section className="activity-context"><div><span>ATIVIDADE PLANEJADA</span><b>{selectedPlan.activity}</b><small>{selectedPlan.trialId} · {formatDate(selectedPlan.start)} · versão {selectedPlan.version}</small></div><Status kind={selectedPlan.version > 1 ? 'attention' : 'ok'}>{selectedPlan.version > 1 ? 'Reprogramada' : 'No prazo'}</Status></section>}<input type="hidden" name="plannedId" value={selectedPlan?.id ?? ''} />
-      <section className="card form-card macro-form-card"><div className="section-number">01</div><div><h2>Local e abrangência</h2><p>Primeiro defina onde o registro será aplicado.</p></div><div><div className="form-grid"><label>Localidade<select name="locationId" value={locationId} onChange={(event) => setLocationId(event.target.value)}>{locations.map((location) => <option key={location.id} value={location.id}>{location.name}</option>)}</select></label><label>Data da atividade<input name="date" type="date" defaultValue={selectedPlan?.start ?? sourceSummary.importedAt} required /></label></div><div className="scope-choice"><label><input type="radio" name="scope" value="Área total" checked={scope === 'Área total'} onChange={() => setScope('Área total')} /><span><b>Área total</b><small>Registro válido para toda a localidade</small></span></label><label><input type="radio" name="scope" value="Grupo específico" checked={scope === 'Grupo específico'} onChange={() => setScope('Grupo específico')} /><span><b>Somente um grupo</b><small>Ensaios, coleção, founder ou multiqualidades</small></span></label></div>{scope === 'Grupo específico' && <div className="macro-group-choice">{(['Ensaios','Coleção','Founder','Multiqualidades'] as MacroGroup[]).map((group) => <label key={group}><input type="radio" name="macroGroup" value={group} checked={macroGroup === group} onChange={() => setMacroGroup(group)} /><span>{group}</span></label>)}</div>}<input type="hidden" name="macroGroup" value={macroGroup} /></div></section>
-      <section className="card form-card macro-form-card"><div className="section-number">02</div><div><h2>Etapa operacional</h2><p>O protocolo e os checks acompanham a etapa escolhida.</p></div><div><div className="macro-stage-choice">{(['Semeadura','Condução','Colheita'] as MacroStage[]).map((stage) => <label key={stage}><input type="radio" name="macroStage" value={stage} checked={macroStage === stage} onChange={() => setMacroStage(stage)} /><span><i>{stage === 'Semeadura' ? '◉' : stage === 'Condução' ? '✦' : '◆'}</i><b>{stage}</b></span></label>)}</div><div className="checklist"><h3>Checks obrigatórios de {macroStage.toLowerCase()}</h3>{checks[macroStage].map((check) => <label key={check}><input type="checkbox" name="checks" value={check} required /><span>✓</span>{check}</label>)}</div><div className="form-grid management-fields"><label>Estádio fenológico observado<input name="stage" placeholder="Ex.: Perfilhamento / Z2.3" /></label><label>Produto ou insumo<input name="product" placeholder="Se aplicável" /></label><label>Dose / regulagem<input name="dose" placeholder="Ex.: 0,75 L/ha" /></label><label>Condição da operação<select name="condition"><option>Conforme planejado</option><option>Executado com ressalva</option><option>Não executado</option></select></label></div></div></section>
-      <section className="card form-card macro-form-card"><div className="section-number">03</div><div><h2>Evidências e qualidade</h2><p>Registre fotos do andamento e a condição observada no campo.</p></div><div><label className="photo-drop"><input name="photos" type="file" accept="image/*" multiple capture="environment" onChange={(event) => setPhotoNames(Array.from(event.target.files ?? []).map((file) => file.name))} /><span>▧</span><b>Adicionar fotos da cultura</b><small>Câmera ou galeria · visão geral e detalhes dos checks</small></label>{photoNames.length > 0 && <div className="photo-file-list">{photoNames.map((name) => <span key={name}>✓ {name}</span>)}</div>}<div className="parameter-grid"><QualityRange name="uniformity" label="Uniformidade" value={quality.uniformity} positive onChange={(value) => setQuality({ ...quality, uniformity: value })} /><QualityRange name="weeds" label="Pressão de daninhas" value={quality.weeds} onChange={(value) => setQuality({ ...quality, weeds: value })} /><QualityRange name="disease" label="Severidade de doenças" value={quality.disease} onChange={(value) => setQuality({ ...quality, disease: value })} /></div><div className={`quality-preview quality-${score.label.toLowerCase().replace('í','i').replace('ç','c')}`}><span>Classificação calculada</span><b>{score.score}<small>/100</small></b><em>{score.label}</em></div><label className="full notes-field">Observações<textarea name="notes" rows={4} placeholder="Condições, desvios, decisões e recomendações para a próxima visita…" /></label></div></section>
-      <section className="form-actions"><span>Nesta demonstração, os dados ficam salvos neste navegador.</span><div><button type="reset" className="secondary-button">Limpar</button><button type="submit" className="primary-button">✓ Salvar e concluir</button></div></section></form>
   </>;
 }
 
@@ -1280,7 +1157,6 @@ function PhenologyActivityForm({ trialList, activities, schedule, onSave, defaul
   const uniformityScore = visitStage === 'Perfilhamento' ? quality.uniformity : Number(establishmentRecord?.details?.uniformidade ?? quality.uniformity);
   const pendingWeedControl = Boolean(latestWeedEvent && Number(latestWeedEvent.details?.daninhas ?? 0) >= 3 && latestWeedEvent.details?.controle_daninhas !== 'Sim, controle confirmado');
   const ratingFor = (group: MacroGroup) => groupRatings[group] ?? { score: 4, condition: 'Adequado', notes: '' };
-  const updateGroup = (group: MacroGroup, update: Partial<{ score: number; condition: string; notes: string }>) => setGroupRatings((current) => ({ ...current, [group]: { ...ratingFor(group), ...update } }));
   const fieldQuality = qualityFrom({ ...quality, establishment: establishmentScore, uniformity: uniformityScore });
   const combinedScore = fieldQuality.score;
   const combined = { score: combinedScore, label: combinedScore >= 85 ? 'Excelente' : combinedScore >= 70 ? 'Adequado' : combinedScore >= 50 ? 'Atenção' : 'Crítico' };
@@ -1291,7 +1167,7 @@ function PhenologyActivityForm({ trialList, activities, schedule, onSave, defaul
 
   return <><PageHead eyebrow={mode === 'operational' ? 'Execução · Manejo e implantação' : 'Inspeção · Acompanhamento de campo'} title={mode === 'operational' ? 'Registro operacional' : 'Registro de campo'} copy={mode === 'operational' ? 'Registre semeadura, aplicações, adubação e demais operações previstas.' : 'Registre inspeções, etiquetagem, roçagem e avaliações da cultura.'} />
     <form className="activity-layout phenology-activity" onSubmit={onSave}>
-      {activePlan && <section className="activity-context"><div><span>VISITA PREVISTA NO PLANEJAMENTO</span><b>{activePlan.activity}</b><small>{activePlan.trialId} · {formatDate(activePlan.start)} · versão {activePlan.version}</small></div><Status kind={activePlan.start < sourceSummary.importedAt ? 'attention' : 'ok'}>{activePlan.start < sourceSummary.importedAt ? 'Em atraso' : 'No prazo'}</Status></section>}
+      {activePlan && <section className="activity-context"><div><span>VISITA PREVISTA NO PLANEJAMENTO</span><b>{activePlan.activity}</b><small>{activePlan.trialId} · {formatDate(activePlan.start)} · versão {activePlan.version}</small></div><Status kind={activePlan.start < todayIso() ? 'attention' : 'ok'}>{activePlan.start < todayIso() ? 'Em atraso' : 'No prazo'}</Status></section>}
       <input type="hidden" name="plannedId" value={activePlan?.id ?? ''} /><input type="hidden" name="recordStream" value={mode} /><input type="hidden" name="baseScope" value="Categoria da área" /><input type="hidden" name="areaCategory" value={activeAreaCategory} /><input type="hidden" name="baseMacroGroup" value={installedGroups[0] ?? groupFromCategory(activeAreaCategory)} /><input type="hidden" name="macroStage" value={macroStage} /><input type="hidden" name="visitStage" value={visitStage} /><input type="hidden" name="expectedStage" value={expectedStage} /><input type="hidden" name="groupAssessments" value={assessments} /><input type="hidden" name="calculatedQualityScore" value={combined.score} />
 
       <section className="card visit-header"><div className="form-grid"><label>Localidade<select name="locationId" value={locationId} onChange={(event) => { const nextLocation = event.target.value; const nextPlan = schedule.find((item) => item.status !== 'Concluído' && activityStreamFor(item) === mode && (item.locationId === nextLocation || trialList.find((trial) => trial.id === item.trialId)?.locationId === nextLocation)); setLocationId(nextLocation); setActivePlanId(nextPlan?.id ?? ''); setVisitStage(visitFromPlan(nextPlan)); setStageEditing(false); setFillPlanted(''); setVisitDate(new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' })); setGroupRatings({}); setCheckedItems([]); }}>{locations.map((location) => <option key={location.id} value={location.id}>{location.name}</option>)}</select></label><label>Atividade planejada por categoria<select value={activePlanId} required onChange={(event) => { const plan = schedule.find((item) => item.id === event.target.value); setActivePlanId(event.target.value); setVisitStage(visitFromPlan(plan)); setStageEditing(false); setFillPlanted(''); setVisitDate(new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' })); setCheckedItems([]); }}><option value="">Selecione</option>{availablePlans.map((plan) => <option key={plan.id} value={plan.id}>{plan.areaCategory ?? 'Área'} · {plan.activity} · {formatDate(plan.start)}</option>)}</select></label><label>Data realizada<input name="date" type="date" value={visitDate} onChange={(event) => setVisitDate(event.target.value)} required /></label></div><div className="visit-summary"><span><b>{activeAreaCategory}</b><small>categoria da atividade</small></span><span><b>{categoryTrials.length}</b><small>ensaios abrangidos</small></span><span><b>{availablePlans.length}</b><small>atividades abertas</small></span></div></section>
@@ -1332,10 +1208,6 @@ function ScoreBoxes({ name, label, value, positive = false, onChange }: { name: 
   return <fieldset className="score-boxes"><legend>{label}</legend><div>{[1,2,3,4,5].map((score) => <label className={value === score ? 'active' : ''} key={score}><input type="radio" name={name} value={score} checked={value === score} onChange={() => onChange(score)} /><b>{score}</b><small>{labels[score - 1]}</small></label>)}</div></fieldset>;
 }
 
-function QualityRange({ name, label, value, positive = false, onChange }: { name: string; label: string; value: number; positive?: boolean; onChange: (value: number) => void }) {
-  return <label className="quality-range"><span>{label}<b>{value}/5</b></span><input name={name} type="range" min="1" max="5" value={value} onChange={(event) => onChange(Number(event.target.value))} /><small>{positive ? '1 = irregular · 5 = uniforme' : '1 = baixa · 5 = alta'}</small></label>;
-}
-
 function HistoryScreen({ activities, onNew }: { activities: Activity[]; onNew: () => void }) {
   const locations = useContext(ProgramLocations) ?? baseLocations;
   return <><PageHead eyebrow="Rastreabilidade" title="Histórico de manejo" copy="Todas as atividades registradas na rede, da mais recente para a mais antiga." action={<button className="primary-button" onClick={onNew}>＋ Nova atividade</button>} />
@@ -1344,7 +1216,7 @@ function HistoryScreen({ activities, onNew }: { activities: Activity[]; onNew: (
   </>;
 }
 
-function AdminRegistrationScreen({ registeredTrials, trialList, activities, schedule, harvests, activeHarvestId, lastUpdated, dynamicFields, onDynamicFields, activityTemplates, onActivityTemplates, onSave, onImportDataset, onImportUnified, onCreatePlanning, onAddLocation, onAddTrials, onCreateHarvest, onHarvestStatus, onHarvest, onFinalizeLayout, onDeleteTrial, onDeleteLocation, onReportImplementation }: { registeredTrials: Trial[]; trialList: Trial[]; activities: Activity[]; schedule: PlannedActivity[]; harvests: Harvest[]; activeHarvestId: string; lastUpdated: string; dynamicFields: DynamicField[]; onDynamicFields: (fields: DynamicField[]) => void; activityTemplates: ActivityTemplate[]; onActivityTemplates: (templates: ActivityTemplate[]) => void; onSave: (event: FormEvent<HTMLFormElement>) => void; onImportDataset: (dataset: string, rows: Record<string, unknown>[]) => void; onImportUnified: (rows: Record<string, unknown>[]) => void; onCreatePlanning: (config: PlanningWizardConfig) => void; onAddLocation: (input: { code: string; name: string; city: string; uf: string; region: string; lat: number; lng: number }) => void; onAddTrials: (input: { locationIds: string[]; trialCode: string; trialName: string; group: MacroGroup; subtype: string; fieldCode: string; fieldName: string; plots: number; sowing: string; owner: string; priority: string }) => void; onCreateHarvest: (name: string, clone: boolean) => void; onHarvestStatus: (id: string, status: HarvestStatus) => void; onHarvest: (id: string) => void; onFinalizeLayout: (payload: LayoutFinalization) => void; onDeleteTrial: (id: string) => void; onDeleteLocation: (id: string) => void; onReportImplementation: (input: { locationId: string; trialId: string; plotIds: string[]; category: string; description: string }) => void }) {
+function AdminRegistrationScreen({ registeredTrials, trialList, activities, schedule, harvests, activeHarvestId, lastUpdated, dynamicFields, onDynamicFields, activityTemplates, onActivityTemplates, onSave, onImportDataset, onImportUnified, onCreatePlanning, onCreateHarvest, onHarvestStatus, onHarvest, onFinalizeLayout, onDeleteTrial, onDeleteLocation, onReportImplementation }: { registeredTrials: Trial[]; trialList: Trial[]; activities: Activity[]; schedule: PlannedActivity[]; harvests: Harvest[]; activeHarvestId: string; lastUpdated: string; dynamicFields: DynamicField[]; onDynamicFields: (fields: DynamicField[]) => void; activityTemplates: ActivityTemplate[]; onActivityTemplates: (templates: ActivityTemplate[]) => void; onSave: (event: FormEvent<HTMLFormElement>) => void; onImportDataset: (dataset: string, rows: Record<string, unknown>[]) => void; onImportUnified: (rows: Record<string, unknown>[]) => void; onCreatePlanning: (config: PlanningWizardConfig) => void; onAddLocation: (input: { code: string; name: string; city: string; uf: string; region: string; lat: number; lng: number }) => void; onAddTrials: (input: { locationIds: string[]; trialCode: string; trialName: string; group: MacroGroup; subtype: string; fieldCode: string; fieldName: string; plots: number; sowing: string; owner: string; priority: string }) => void; onCreateHarvest: (name: string, clone: boolean) => void; onHarvestStatus: (id: string, status: HarvestStatus) => void; onHarvest: (id: string) => void; onFinalizeLayout: (payload: LayoutFinalization) => void; onDeleteTrial: (id: string) => void; onDeleteLocation: (id: string) => void; onReportImplementation: (input: { locationId: string; trialId: string; plotIds: string[]; category: string; description: string }) => void }) {
   const locations = useContext(ProgramLocations) ?? baseLocations;
   const [tab, setTab] = useState<'unified' | 'catalog' | 'fields' | 'templates' | 'harvests' | 'planner' | 'import' | 'records' | 'quality' | 'alerts' | 'implantation'>('unified');
   const [issueLocation, setIssueLocation] = useState(locations[0]?.id ?? '');
@@ -1376,7 +1248,6 @@ function AdminRegistrationScreen({ registeredTrials, trialList, activities, sche
   const [plannerTrials, setPlannerTrials] = useState<string[]>([]);
   const [plannerProfile, setPlannerProfile] = useState<PlanningWizardConfig['profile']>('Completo');
   const [unifiedResult, setUnifiedResult] = useState<{ name: string; rows: Record<string, unknown>[]; errors: string[] } | null>(null);
-  const [selectedLocations, setSelectedLocations] = useState<string[]>([]);
   const [clonePlanning, setClonePlanning] = useState(true);
   const requiredColumns: Record<string, string[]> = { Localidades: ['id','nome','cidade','uf','latitude','longitude','regiao'], Campos: ['campo_id','localidade_id','nome','area_ha'], Ensaios: ['ensaio_id','campo_id','nome','grupo','data_semeadura','parcelas'], Planejamento: ['planejamento_id','localidade_id','ensaio_id','atividade','etapa','data_prevista','responsavel','prioridade','status'], Atividades: ['atividade_id','localidade_id','etapa','data','status'], Configurações: ['chave','valor'] };
   const availablePlannerTrials = trialList.filter((trial) => trial.locationId === plannerLocation && (plannerType === 'Todos' || trial.type === plannerType));
@@ -1407,14 +1278,12 @@ function AdminRegistrationScreen({ registeredTrials, trialList, activities, sche
     } catch (error) { setUnifiedResult({ name: file.name, rows: [], errors: [error instanceof Error ? error.message : 'Não foi possível ler a planilha.'] }); }
     setImporting(false);
   }
-  function submitManagedLocation(event: FormEvent<HTMLFormElement>) { event.preventDefault(); const data = new FormData(event.currentTarget); onAddLocation({ code: String(data.get('code')), name: String(data.get('name')), city: String(data.get('city')), uf: String(data.get('uf')), region: String(data.get('region')), lat: Number(data.get('lat')), lng: Number(data.get('lng')) }); event.currentTarget.reset(); }
-  function submitManagedTrials(event: FormEvent<HTMLFormElement>) { event.preventDefault(); const data = new FormData(event.currentTarget); onAddTrials({ locationIds: selectedLocations, trialCode: String(data.get('trialCode')), trialName: String(data.get('trialName')), group: String(data.get('group')) as MacroGroup, subtype: String(data.get('subtype') || ''), fieldCode: String(data.get('fieldCode')), fieldName: String(data.get('fieldName')), plots: Number(data.get('plots')), sowing: String(data.get('sowing')), owner: String(data.get('owner')), priority: String(data.get('priority')) }); setSelectedLocations([]); event.currentTarget.reset(); }
   function submitHarvest(event: FormEvent<HTMLFormElement>) { event.preventDefault(); const data = new FormData(event.currentTarget); onCreateHarvest(String(data.get('harvestName')), clonePlanning); event.currentTarget.reset(); }
   function saveWeights() { localStorage.setItem('fwt-quality-weights', JSON.stringify(weights)); setSavedMessage('Pesos e componentes de qualidade salvos.'); setTimeout(() => setSavedMessage(''), 3000); }
   function addVariable(event: FormEvent<HTMLFormElement>) { event.preventDefault(); const form = new FormData(event.currentTarget); const name = String(form.get('variable')).trim(); if (name && !variables.includes(name)) setVariables([...variables, name]); event.currentTarget.reset(); }
   function addLocation(event: FormEvent<HTMLFormElement>) { event.preventDefault(); const form = new FormData(event.currentTarget); const next = [...adminLocations, { name: String(form.get('name')), city: String(form.get('city')), region: String(form.get('region')) }]; setAdminLocations(next); localStorage.setItem('fwt-admin-locations', JSON.stringify(next)); event.currentTarget.reset(); }
   function exportReport() {
-    const rows = locations.map((location) => { const overview = localityOverview(location.id, trialList, activities, schedule); return [location.name, overview.localTrials.length, overview.plantedPercent, overview.stage, overview.quality, schedule.filter((item) => overview.localTrials.some((trial) => trial.id === item.trialId) && item.status !== 'Concluído' && item.start < sourceSummary.importedAt).length]; });
+    const rows = locations.map((location) => { const overview = localityOverview(location.id, trialList, activities, schedule); return [location.name, overview.localTrials.length, overview.plantedPercent, overview.stage, overview.quality, schedule.filter((item) => overview.localTrials.some((trial) => trial.id === item.trialId) && item.status !== 'Concluído' && item.start < todayIso()).length]; });
     const csv = [['Localidade','Ensaios','Percentual semeado','Estadio predominante','Qualidade media','Alertas'], ...rows].map((row) => row.map((value) => `"${String(value).replaceAll('"','""')}"`).join(';')).join('\n');
     const url = URL.createObjectURL(new Blob([`\uFEFF${csv}`], { type: 'text/csv;charset=utf-8' })); const link = document.createElement('a'); link.href = url; link.download = 'resumo-evolucao-campos.csv'; link.click(); URL.revokeObjectURL(url);
   }
@@ -1465,7 +1334,7 @@ function AdminRegistrationScreen({ registeredTrials, trialList, activities, sche
     {tab === 'import' && <section className="admin-data-grid"><article className="card admin-upload-card"><span className="eyebrow">BASE EXCEL / CSV</span><h2>Importar dados operacionais</h2><p>Selecione a tabela correspondente. O arquivo é validado antes de substituir a base salva neste navegador.</p><label>Tipo de informação<select value={dataset} onChange={(event) => { setDataset(event.target.value); setImportResult(null); }}>{Object.keys(requiredColumns).map((name) => <option key={name}>{name}</option>)}</select></label><label className="spreadsheet-drop"><input type="file" accept=".xlsx,.xls,.csv" onChange={(event) => importFile(event.target.files?.[0])} /><span>▤</span><b>{importing ? 'Lendo planilha…' : 'Selecionar Excel ou CSV'}</b><small>.xlsx, .xls ou .csv</small></label><a className="template-download" href="modelo-field-wheat-testing.xlsx" download>↓ Baixar modelo formatado</a></article><article className="card import-validation"><div className="card-head"><div><h2>Validação da estrutura</h2><p>Colunas obrigatórias para {dataset.toLowerCase()}</p></div></div><div className="required-columns">{requiredColumns[dataset].map((column) => <span key={column}>{column}</span>)}</div>{!importResult ? <div className="empty-admin"><span>✓</span><p>Envie uma planilha para conferir a estrutura e visualizar as primeiras linhas.</p></div> : <><div className={importResult.errors.length ? 'import-state error' : 'import-state success'}><b>{importResult.errors.length ? 'Arquivo com pendências' : 'Arquivo validado'}</b><small>{importResult.name} · {importResult.rows.length} registros</small>{importResult.errors.map((error) => <em key={error}>{error}</em>)}</div>{!importResult.errors.length && <div className="import-preview">{importResult.rows.slice(0,3).map((row,index) => <code key={index}>{Object.values(row).slice(0,4).join(' · ')}</code>)}</div>}</>}</article></section>}
     {tab === 'records' && <><section className="admin-config-grid"><form className="card quick-admin-form" onSubmit={addLocation}><span className="eyebrow">LOCALIDADES</span><h2>Adicionar localidade</h2><label>Nome<input name="name" required placeholder="Ex.: Não-Me-Toque - RS" /></label><label>Município<input name="city" required /></label><label>RHA<select name="region"><option value="RHA_1">RHA I</option><option value="RHA_2">RHA II</option><option value="RHA_3">RHA III</option></select></label><button className="secondary-button">Adicionar localidade</button><small>{locations.length + adminLocations.length} localidades configuradas</small></form><article className="card admin-catalog"><h2>Itens configuráveis</h2>{[['Localidades',locations.length + adminLocations.length],['Grupos de manejo',4],['Protocolos',3],['Variáveis de atividade',variables.length]].map(([name,count]) => <div key={name}><span>{name}</span><b>{count}</b><button>Editar</button></div>)}</article></section><details className="manual-trial card"><summary>Cadastro manual de campo e ensaio</summary><form className="admin-register-form" onSubmit={onSave}><div className="form-grid"><label>Nome do campo<input name="fieldName" required /></label><label>Localidade<select name="location">{locations.map((location) => <option value={location.id} key={location.id}>{location.name}</option>)}</select></label><label>Área (ha)<input name="area" type="number" step="0.1" required /></label><label>Solo<select name="soil"><option>Latossolo</option><option>Nitossolo</option><option>Outro</option></select></label><label>Nome do ensaio<input name="trialName" required /></label><label>Tipo<select name="trialType"><option>VCU</option><option>PRYT</option><option>EYT</option></select></label><label>Parcelas<input name="plots" type="number" defaultValue="60" required /></label><label>Prioridade<select name="priority"><option>Normal</option><option>Alta</option><option>Crítica</option></select></label><label>Responsável<select name="owner">{importedUsers.map((user) => <option key={user.id}>{user.name}</option>)}</select></label><label>Semeadura prevista<input name="sowing" type="date" defaultValue="2026-06-15" required /></label></div><input type="hidden" name="profile" value="Completo" /><button className="primary-button">Criar campo e planejamento</button><small>{registeredTrials.length} cadastro(s) manual(is) nesta sessão.</small></form></details></>}
     {tab === 'quality' && <section className="quality-admin-grid"><article className="card weight-editor"><div className="card-head"><div><h2>Média ponderada de qualidade</h2><p>Os pesos devem totalizar 100%.</p></div><b className={Object.values(weights).reduce((sum: number, value: unknown) => sum + Number(value),0) === 100 ? 'weight-total valid' : 'weight-total'}>{Object.values(weights).reduce((sum: number, value: unknown) => sum + Number(value),0)}%</b></div>{Object.entries(weights).map(([key,value]) => <label key={key}><span>{key.charAt(0).toUpperCase()+key.slice(1)}<b>{Number(value)}%</b></span><input type="range" min="0" max="50" value={Number(value)} onChange={(event) => setWeights({ ...weights, [key]: Number(event.target.value) })} /></label>)}<button className="primary-button" onClick={saveWeights}>Salvar regra de cálculo</button></article><article className="card variable-editor"><h2>Componentes da avaliação</h2><p>Campos exibidos nos checks de qualidade do ensaio.</p><div>{variables.map((variable) => <span key={variable}>✓ {variable}<button onClick={() => setVariables(variables.filter((item) => item !== variable))}>×</button></span>)}</div><form onSubmit={addVariable}><input name="variable" placeholder="Nova variável de qualidade" required /><button className="secondary-button">Adicionar</button></form></article></section>}
-    {tab === 'alerts' && <section className="alert-report-grid"><article className="card alert-rule-card"><span className="eyebrow">REGRA DE ACOMPANHAMENTO</span><h2>Pressão de plantas daninhas</h2><p>Quando a pressão for detectada em uma visita, uma verificação obrigatória é criada automaticamente para a visita seguinte.</p><div className="rule-flow"><span><b>Visita X</b><small>Pressão detectada ≥ nível 3</small></span><i>→</i><span><b>Alerta aberto</b><small>Solicitar ação corretiva</small></span><i>→</i><span><b>Visita Y</b><small>Resolvido, parcial ou não resolvido</small></span></div><div className="form-grid"><label>Nível de disparo<select><option>3 - Moderada</option><option>2 - Baixa</option><option>4 - Alta</option></select></label><label>Prazo da revisita<input type="number" defaultValue="7" /> dias</label></div><label className="rule-toggle"><input type="checkbox" defaultChecked /> Regra ativa para toda a rede</label></article><article className="card report-card"><span className="eyebrow">RELATÓRIO GERENCIAL</span><h2>Evolução dos campos</h2><p>Resumo por localidade com implantação, estádio, qualidade média e alertas pendentes.</p><div><span><b>{trialList.length}</b><small>ensaios</small></span><span><b>{activities.length}</b><small>registros</small></span><span><b>{schedule.filter((item) => item.status !== 'Concluído' && item.start < sourceSummary.importedAt).length}</b><small>alertas</small></span></div><button className="primary-button" onClick={exportReport}>↓ Emitir relatório CSV</button></article></section>}
+    {tab === 'alerts' && <section className="alert-report-grid"><article className="card alert-rule-card"><span className="eyebrow">REGRA DE ACOMPANHAMENTO</span><h2>Pressão de plantas daninhas</h2><p>Quando a pressão for detectada em uma visita, uma verificação obrigatória é criada automaticamente para a visita seguinte.</p><div className="rule-flow"><span><b>Visita X</b><small>Pressão detectada ≥ nível 3</small></span><i>→</i><span><b>Alerta aberto</b><small>Solicitar ação corretiva</small></span><i>→</i><span><b>Visita Y</b><small>Resolvido, parcial ou não resolvido</small></span></div><div className="form-grid"><label>Nível de disparo<select><option>3 - Moderada</option><option>2 - Baixa</option><option>4 - Alta</option></select></label><label>Prazo da revisita<input type="number" defaultValue="7" /> dias</label></div><label className="rule-toggle"><input type="checkbox" defaultChecked /> Regra ativa para toda a rede</label></article><article className="card report-card"><span className="eyebrow">RELATÓRIO GERENCIAL</span><h2>Evolução dos campos</h2><p>Resumo por localidade com implantação, estádio, qualidade média e alertas pendentes.</p><div><span><b>{trialList.length}</b><small>ensaios</small></span><span><b>{activities.length}</b><small>registros</small></span><span><b>{schedule.filter((item) => item.status !== 'Concluído' && item.start < todayIso()).length}</b><small>alertas</small></span></div><button className="primary-button" onClick={exportReport}>↓ Emitir relatório CSV</button></article></section>}
   </>;
 }
 
@@ -1518,21 +1387,11 @@ function ActivityFieldManager({ fields, onChange }: { fields: DynamicField[]; on
   return <section className="dynamic-field-manager"><form className="card dynamic-field-form" onSubmit={save}><span className="eyebrow">FORMULÁRIO DINÂMICO</span><h2>{editingId ? 'Editar variável' : 'Nova variável de atividade'}</h2><p>Defina o tipo de coleta e onde o campo ficará disponível.</p><label>Nome da variável<input value={draft.label} onChange={(event) => setDraft({ ...draft, label: event.target.value })} required placeholder="Ex.: Umidade do solo" /></label><label>Tipo de campo<select value={draft.type} onChange={(event) => setDraft({ ...draft, type: event.target.value as DynamicFieldType })}><option value="text">Texto</option><option value="select">Seleção</option><option value="number">Numérico</option><option value="date">Data</option></select></label>{draft.type === 'select' && <label>Opções<textarea value={draft.options.join('\n')} onChange={(event) => setDraft({ ...draft, options: event.target.value.split('\n') })} rows={4} placeholder={'Uma opção por linha'} /></label>}<label>Vincular a<select value={draft.entity} onChange={(event) => setDraft({ ...draft, entity: event.target.value as DynamicField['entity'] })}><option value="both">Ambos</option><option value="field">Registros de Campo</option><option value="operational">Operacional</option></select></label><div className="field-visibility"><label><input type="checkbox" checked={draft.visibleField} onChange={(event) => setDraft({ ...draft, visibleField: event.target.checked })} />Visível em Registros de Campo</label><label><input type="checkbox" checked={draft.visibleOperational} onChange={(event) => setDraft({ ...draft, visibleOperational: event.target.checked })} />Visível em Operacional</label></div><div className="dynamic-form-actions">{editingId && <button type="button" className="secondary-button" onClick={reset}>Cancelar</button>}<button className="primary-button">{editingId ? 'Salvar alterações' : 'Adicionar variável'}</button></div></form><article className="card dynamic-field-list"><div className="card-head"><div><h2>Campos configurados</h2><p>Controle a visibilidade sem excluir a estrutura dos registros.</p></div><b>{fields.length}</b></div>{fields.map((field) => <div className="dynamic-field-row" key={field.id}><span><b>{field.label}</b><small>{field.type === 'select' ? `Seleção · ${field.options.length} opções` : field.type === 'number' ? 'Numérico' : field.type === 'date' ? 'Data' : 'Texto'} · {field.entity === 'both' ? 'Ambos' : field.entity === 'field' ? 'Campo' : 'Operacional'}</small></span><label><input type="checkbox" checked={field.visibleField} onChange={(event) => updateField(field.id, { visibleField: event.target.checked })} />Campo</label><label><input type="checkbox" checked={field.visibleOperational} onChange={(event) => updateField(field.id, { visibleOperational: event.target.checked })} />Operacional</label><button className="secondary-button" onClick={() => edit(field)}>Editar</button><button className="danger-link" onClick={() => confirmAction(`Excluir a variável ${field.label}?`, () => onChange(fields.filter((item) => item.id !== field.id)))}>Excluir</button></div>)}</article></section>;
 }
 
-function CatalogManagementPanel({ locationsList, locked, selected, onToggle, onLocation, onTrials }: { locationsList: NetworkLocation[]; locked: boolean; selected: string[]; onToggle: (id: string) => void; onLocation: (event: FormEvent<HTMLFormElement>) => void; onTrials: (event: FormEvent<HTMLFormElement>) => void }) {
-  const [group, setGroup] = useState<MacroGroup>('Ensaios');
-  const [subtype, setSubtype] = useState('VCU');
-  return <section className="management-grid">
-    <form className="card management-form" onSubmit={onLocation}><fieldset disabled={locked}><span className="eyebrow">CADASTRO DIRETO</span><h2>Nova localidade</h2><div className="form-grid"><label>Código<input name="code" required placeholder="LOC-01" /></label><label>Nome<input name="name" required /></label><label>Município<input name="city" required /></label><label>UF<input name="uf" maxLength={2} required /></label><label>Região homogênea de adaptação (RHA)<select name="region"><option value="RHA_1">RHA I</option><option value="RHA_2">RHA II</option><option value="RHA_3">RHA III</option></select></label><label>Latitude<input name="lat" type="number" step="0.000001" /></label><label>Longitude<input name="lng" type="number" step="0.000001" /></label></div><button className="secondary-button">Adicionar localidade</button></fieldset></form>
-    <form className="card management-form trial-batch" onSubmit={onTrials}><fieldset disabled={locked}><span className="eyebrow">ATRIBUIÇÃO POR LOCAL</span><h2>Indicar quais ensaios vão para cada local</h2><p>Configure um ensaio, marque exatamente os locais que irão recebê-lo e confirme. Repita para cada combinação necessária.</p><div className="form-grid assignment-type"><label>Grupo<select name="group" value={group} onChange={(event) => setGroup(event.target.value as MacroGroup)}><option>Ensaios</option><option>Coleção</option><option>Founder</option><option>PD</option><option>Multiqualidades</option><option>Outro</option></select></label>{group === 'Ensaios' && <label>Tipo de ensaio<select name="subtype" value={subtype} onChange={(event) => setSubtype(event.target.value)}><option>VCU</option><option>EYT</option><option>PRYT</option></select></label>}<label>Código-base<input name="trialCode" required /></label><label>Nome do ensaio<input name="trialName" required /></label></div><h3 className="assignment-heading">Locais que receberão este ensaio <b>{selected.length} selecionado(s)</b></h3><div className="location-checks">{locationsList.map((location) => <label key={location.id}><input type="checkbox" checked={selected.includes(location.id)} onChange={() => onToggle(location.id)} /><span>✓</span><b>{location.name}</b><small>{location.region.replace('_',' ')}</small></label>)}</div><div className="form-grid"><label>Código do campo<input name="fieldCode" required /></label><label>Nome do campo<input name="fieldName" required /></label><label>Parcelas por local<input name="plots" type="number" min="1" defaultValue="60" required /></label><label>Semeadura prevista<input name="sowing" type="date" required /></label><label>Responsável<input name="owner" defaultValue="Equipe de campo" required /></label><label>Prioridade<select name="priority"><option>Média</option><option>Alta</option><option>Crítica</option></select></label></div><button className="primary-button" disabled={!selected.length}>Atribuir {group === 'Ensaios' ? subtype : group} a {selected.length} local(is)</button></fieldset></form>
-  </section>;
-}
-
 function HarvestManagementPanel({ harvests, activeId, clonePlanning, onClone, onCreate, onSelect, onStatus }: { harvests: Harvest[]; activeId: string; clonePlanning: boolean; onClone: (value: boolean) => void; onCreate: (event: FormEvent<HTMLFormElement>) => void; onSelect: (id: string) => void; onStatus: (id: string, status: HarvestStatus) => void }) {
   return <section className="harvest-management"><form className="card new-harvest-card" onSubmit={onCreate}><span className="eyebrow">NOVA SAFRA</span><h2>Criar ciclo operacional</h2><label>Nome da safra<input name="harvestName" required placeholder="Safra 2027" /></label><label className="clone-option"><input type="checkbox" checked={clonePlanning} onChange={(event) => onClone(event.target.checked)} /><span><b>Copiar o planejamento da safra atual</b><small>Locais, ensaios e visitas são reaproveitados; registros e notas começam vazios.</small></span></label><button className="primary-button">Confirmar e criar safra</button></form><section className="card harvest-history"><div className="card-head"><div><h2>Histórico de safras</h2><p>Consulte qualidade e situação de cada ciclo.</p></div></div>{harvests.map((harvest) => <article key={harvest.id} className={harvest.id === activeId ? 'active' : ''}><button type="button" onClick={() => onSelect(harvest.id)}><span><b>{harvest.name}</b><small>{harvest.updatedAt ? `Atualizada em ${new Date(harvest.updatedAt).toLocaleDateString('pt-BR')}` : 'Sem atualização'}</small></span><strong>{harvest.quality}/100</strong><em>{harvest.status}</em></button>{harvest.id === activeId && <button className="secondary-button" type="button" onClick={() => onStatus(harvest.id, harvest.status === 'Ativa' ? 'Encerrada' : 'Ativa')}>{harvest.status === 'Ativa' ? 'Encerrar e bloquear registros' : 'Reabrir como administrador'}</button>}</article>)}</section></section>;
 }
 
 function UsersScreen() {
-  const locations = useContext(ProgramLocations) ?? baseLocations;
   return <><PageHead eyebrow="Equipe · Excel" title="Usuários" copy={`${sourceSummary.users} pessoas com acesso cadastradas na planilha.`} action={<button className="primary-button">＋ Convidar usuário</button>} />
     <section className="card permission-manager"><div className="card-head"><div><span className="eyebrow">HIERARQUIA DE ACESSO</span><h2>Gestão de permissões</h2><p>Os níveis herdam a leitura da plataforma e recebem apenas as ações necessárias ao seu fluxo.</p></div></div><div className="permission-flow">{([['Administrador','Acesso total, usuários e regras'],['Gestor','Indicadores, planejamento e configurações'],['RA','Áreas, atividades e reportes'],['Técnico responsável','Execução e registros de campo']] as const).map(([role, copy], index) => <article key={role}><i>{index + 1}</i><div><b>{role}</b><small>{copy}</small></div><span>{index === 0 ? 'Controle total' : 'Acesso subordinado'}</span></article>)}</div><div className="permission-matrix"><b>Recurso</b><b>ADM</b><b>Gestor</b><b>RA</b><b>Técnico</b>{[['Cadastros e permissões','✓','—','—','—'],['Indicadores e regras','✓','✓','Leitura','Leitura'],['Áreas e planejamento','✓','✓','✓','Leitura'],['Atividades e reportes','✓','✓','✓','✓']].flatMap((row) => row.map((cell, index) => <span key={`${row[0]}-${index}`}>{cell}</span>))}</div></section>
     <section className="user-grid">{importedUsers.map((user, index) => { const initials = user.name.split(' ').map((part) => part[0]).join('').slice(0, 2).toUpperCase(); return <article className="card user-card" key={user.id}><div className={`avatar color-${index}`}>{initials}</div><div><h2>{user.name}</h2><p>{user.role}</p><span>◎ {user.locations}</span></div><Status kind={user.active ? 'ok' : 'attention'}>{user.active ? 'Ativo' : 'Pendente'}</Status><button>•••</button></article>; })}</section>
@@ -1544,7 +1403,7 @@ function TrialDetail({ trial, activities, schedule, onBack, onActivity, onPlanne
   return <><button className="back-button" onClick={onBack}>← Voltar para ensaios</button><PageHead eyebrow={trial.id} title={trial.name} copy={`${trial.place} · Safra 2026 · ${trial.plots} parcelas`} action={<button className="primary-button" onClick={onActivity}>＋ Registrar atividade</button>} />
     <section className="detail-grid"><article className="card protocol-card"><div className="card-head"><div><h2>Ficha do ensaio</h2><p>Informações gerais importadas do Excel.</p></div><QualityBadge trial={trial} activities={activities} /></div><dl><div><dt>Tipo do ensaio</dt><dd>{trial.type}</dd></div><div><dt>Estádio fenológico</dt><dd>{phenologicalStage(trial)}</dd></div><div><dt>Prioridade</dt><dd>{trial.priority}</dd></div><div><dt>Parcelas</dt><dd>{trial.plots.toLocaleString('pt-BR')}</dd></div><div><dt>Semeadura</dt><dd>{formatDate(trial.sowing)}</dd></div><div><dt>Responsável</dt><dd>{trial.owner}</dd></div></dl></article><article className="card progress-card"><span className="eyebrow">Progresso do ciclo</span><b>{trial.progress}%</b><div className="progress"><i style={{ width: `${trial.progress}%` }} /></div><ul><li className="done">Semeadura</li><li className="done">Emergência</li><li className="active">{phenologicalStage(trial)}</li><li>Próximo manejo</li><li>Colheita · {formatDate(trial.harvest)}</li></ul></article></section>
     {quality.alerts.length > 0 && <section className="card trial-alerts"><div className="card-head"><div><span className="eyebrow">ALERTAS QUE IMPACTAM A QUALIDADE</span><h2>Ocorrências abertas</h2><p>Desconto acumulado de {quality.penalty}% na qualidade deste ensaio.</p></div><strong>−{quality.penalty}%</strong></div>{quality.alerts.map((alert) => <article key={alert.id}><span>!</span><div><b>{alert.alertCategory}</b><p>{alert.details?.ocorrencia || alert.notes}</p><small>{alert.date} · {alert.scope}{alert.plotIds?.length ? ` · PlotID: ${alert.plotIds.join(', ')}` : ''}</small></div><em>−{alert.qualityPenalty}%</em></article>)}</section>}
-    <section className="card detail-activity"><div className="card-head"><div><h2>Próximos manejos</h2><p>Clique em um manejo para realizar o registro.</p></div></div>{schedule.filter((item) => item.trialId === trial.id && item.start >= sourceSummary.importedAt && item.status !== 'Concluído').sort((a, b) => a.start.localeCompare(b.start)).slice(0, 3).map((item, index) => { const date = dateParts(item.start); return <button className="management-row" key={item.id} onClick={() => onPlannedActivity(item)}><span>{date.day} {date.month}</span><div><b>{item.activity}</b><p>{item.category} · Responsável: {item.owner}</p></div><Status kind={index === 0 ? 'attention' : 'ok'}>{item.version > 1 ? `Versão ${item.version}` : index === 0 ? 'Próximo' : 'Planejado'}</Status></button>; })}</section>
+    <section className="card detail-activity"><div className="card-head"><div><h2>Próximos manejos</h2><p>Clique em um manejo para realizar o registro.</p></div></div>{schedule.filter((item) => item.trialId === trial.id && item.start >= todayIso() && item.status !== 'Concluído').sort((a, b) => a.start.localeCompare(b.start)).slice(0, 3).map((item, index) => { const date = dateParts(item.start); return <button className="management-row" key={item.id} onClick={() => onPlannedActivity(item)}><span>{date.day} {date.month}</span><div><b>{item.activity}</b><p>{item.category} · Responsável: {item.owner}</p></div><Status kind={index === 0 ? 'attention' : 'ok'}>{item.version > 1 ? `Versão ${item.version}` : index === 0 ? 'Próximo' : 'Planejado'}</Status></button>; })}</section>
   </>;
 }
 

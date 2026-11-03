@@ -33,6 +33,9 @@ jobs:
       - name: Instalar dependências
         run: pnpm install --frozen-lockfile
 
+      - name: Validar tipos e regressões da beta
+        run: pnpm typecheck && pnpm test
+
       - name: Gerar versão estática
         run: pnpm build:github-pages
 

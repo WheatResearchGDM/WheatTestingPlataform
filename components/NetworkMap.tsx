@@ -2,27 +2,11 @@
 
 import { useMemo, useState } from 'react';
 import { CircleMarker, MapContainer, Popup, TileLayer, Tooltip } from 'react-leaflet';
-import type { LocationWeather } from '../lib/weatherAlerts';
 
-export type NetworkLocation = {
-  id: string;
-  name: string;
-  city: string;
-  region: string;
-  rha?: string;
-  program?: 'U' | 'K' | 'X';
-  lat: number;
-  lng: number;
-  trials: number;
-  plots: number;
-  status: 'ok' | 'attention' | 'late';
-  qualityTone?: 'excellent' | 'adequate' | 'attention' | 'critical' | 'neutral';
-  qualityScore?: number;
-  plantedPercent?: number;
-  phenologicalStage?: string;
-  alertCount?: number;
-  weather?: LocationWeather;
-};
+
+import type { NetworkLocation } from '../domain/types';
+export type { NetworkLocation } from '../domain/types';
+
 
 const statusColors = { ok: '#4d885e', attention: '#d9a72f', late: '#c95b45' };
 const statusLabels = { ok: 'Em dia', attention: 'Atenção', late: 'Atrasado' };

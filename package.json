@@ -1,6 +1,6 @@
 {
   "name": "sites-project",
-  "version": "0.1.0",
+  "version": "0.2.0-beta.1",
   "private": true,
   "packageManager": "pnpm@11.19.0",
   "engines": {
@@ -11,7 +11,9 @@
     "build": "vinext build",
     "build:github-pages": "vite build --config vite.github.config.ts && node scripts/prepare-github-pages.mjs",
     "start": "vinext start",
-    "lint": "eslint . --ignore-pattern dist --ignore-pattern .next"
+    "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
+    "test": "node scripts/run-tests.cjs",
+    "typecheck": "tsc --noEmit --noUnusedLocals --noUnusedParameters"
   },
   "dependencies": {
     "exceljs": "4.4.0",

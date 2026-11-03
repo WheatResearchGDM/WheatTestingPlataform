@@ -1,7 +1,9 @@
+import ApplicationBoundary from '../components/ApplicationBoundary';
 import type { Metadata, Viewport } from 'next';
 import './globals.css';
 import './design-system.css';
 import './mobile.css';
+import './field-layout.css';
 
 export const metadata: Metadata = {
   metadataBase: new URL('https://wheatresearchgdm.github.io/WheatTestingPlataform/'),
@@ -36,7 +38,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="pt-BR">
-      <body>{children}</body>
+      <body><ApplicationBoundary>{children}</ApplicationBoundary></body>
     </html>
   );
 }

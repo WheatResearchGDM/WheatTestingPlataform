@@ -1,0 +1,16 @@
+const assert = require('node:assert/strict');
+const { Workbook } = require('exceljs');
+const load = require('./load-typescript.cjs')();
+const { parsePlantingSheet, spreadsheetText } = load('lib/plantingImport.ts');
+const book = new Workbook(), sheet = book.addWorksheet('Mapa');
+sheet.getCell('A1').value = 1; sheet.getCell('A1').numFmt = '000';
+sheet.getCell('B1').value = 'PULV'; sheet.getCell('B2').value = 'PULV';
+sheet.getCell('C3').value = { formula: '1+1', result: 2 };
+sheet.getCell('Z10000').fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF00FF00' } };
+const plots = parsePlantingSheet(sheet, () => '#123456');
+assert.equal(plots.length, 4); assert.equal(plots[0].plotId, '001'); assert.equal(plots[0].row, 3);
+assert.equal(plots.at(-1).plotId, '2'); assert.equal(plots.at(-1).row, 1);
+assert.equal(plots[0].excelColor, '#123456'); assert.equal(spreadsheetText(sheet.getCell('A1')), '001');
+sheet.getCell('D1').value = '001';
+assert.throws(() => parsePlantingSheet(sheet, () => undefined), /duplicado/);
+console.log('Excel import: sparse sheets, formatting outside map, leading zeros, formula results, colors and duplicate validation passed.');
