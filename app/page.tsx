@@ -6,6 +6,7 @@ import type { NetworkLocation } from '../components/NetworkMap';
 import type { LayoutFinalization } from '../components/FieldLayoutMap';
 import { fetchWeatherConditions, type LocationWeather } from '../lib/weatherAlerts';
 import RoutePlanner from '../components/RoutePlanner';
+import { parseLayout, stringifyLayout } from '../lib/layoutStorage';
 import { mountNavigationAssistant } from '../lib/navigation-assistant.js';
 import MobileAgenda from '../components/MobileAgenda';
 import { PhotoCapture, ActivityPhotoGallery } from '../components/ActivityPhotos';
@@ -62,10 +63,10 @@ function confirmAction(message: string, action: () => void) {
   if (window.confirm(message)) action();
 }
 
-const baseLocations: NetworkLocation[] = importedLocations.map((location) => ({ ...location }));
-const baseTrials: Trial[] = importedTrials.map((trial) => ({ ...trial }));
-const basePlanning: PlannedActivity[] = importedPlanning.map((activity) => ({ ...activity }));
-const baseActivities: Activity[] = importedActivities.map((activity) => activity);
+const baseLocations: NetworkLocation[] = [];
+const baseTrials: Trial[] = [];
+const basePlanning: PlannedActivity[] = [];
+const baseActivities: Activity[] = [];
 const locations: NetworkLocation[] = baseLocations.map((location) => ({ ...location }));
 const trials: Trial[] = baseTrials.map((trial) => ({ ...trial }));
 const initialPlanning: PlannedActivity[] = basePlanning.map((activity) => ({ ...activity }));
@@ -286,6 +287,36 @@ export default function Home() {
   const [programId, setProgramId] = useState('Brasil');
   const [phase, setPhase] = useState<'login' | 'profile' | 'app'>('login');
   const [savingActivity, setSavingActivity] = useState(false);
+  const [areaBackupAvailable, setAreaBackupAvailable] = useState(() => typeof window !== 'undefined' && Boolean(localStorage.getItem('field-wheat-area-backup-v1')));
+  function resetAreas() {
+    if (currentRole !== 'Administrador') return;
+    try {
+      const snapshot: HarvestSnapshot = { locations: [...locations], trials: allTrials, schedule, activities, source: JSON.parse(localStorage.getItem('field-wheat-unified-source-v1') ?? '[]'), updatedAt: new Date().toISOString() };
+      const keys = Object.keys(localStorage).filter((key) => locations.some((location) => key === `field-wheat-layout-${activeHarvestId}-${location.id}` || key === `field-wheat-layout-catalog-${activeHarvestId}-${location.id}`));
+      const layouts = Object.fromEntries(keys.map((key) => [key, localStorage.getItem(key)]));
+      // Persist recovery data before removing any current records.
+      localStorage.setItem('field-wheat-area-backup-v1', JSON.stringify({ harvestId: activeHarvestId, snapshot, layouts }));
+      const empty: HarvestSnapshot = { locations: [], trials: [], schedule: [], activities: [], source: [], updatedAt: new Date().toISOString() };
+      persistHarvestSnapshot(empty);
+      keys.forEach((key) => localStorage.removeItem(key));
+      for (const key of ['field-wheat-locations-clean-v1', 'field-wheat-imported-trials-clean-v1', 'field-wheat-trials-clean-v1', 'field-wheat-schedule-clean-v1', 'field-wheat-activities-clean-v1', 'field-wheat-unified-source-v1']) localStorage.setItem(key, '[]');
+      locations.splice(0); trials.splice(0); setRegisteredTrials([]); setSchedule([]); setActivities([]); setSelectedTrial(blankTrial); setSelectedPlan(null); setWeatherConditions([]); setWeatherCheckedAt(''); localStorage.removeItem('field-wheat-weather-conditions-v2'); localStorage.removeItem('field-wheat-weather-checked-v2'); setAreaBackupAvailable(true); setDataVersion((value) => value + 1);
+      setToast('Áreas da safra limpas. Uma cópia recuperável foi preservada neste navegador.');
+    } catch { setToast('Não foi possível preservar a cópia de segurança. A limpeza não foi concluída.'); }
+  }
+  function restoreAreas() {
+    if (currentRole !== 'Administrador' || locations.length) return;
+    try {
+      const backup = JSON.parse(localStorage.getItem('field-wheat-area-backup-v1') ?? 'null') as { harvestId: string; snapshot: HarvestSnapshot; layouts: Record<string, string> } | null;
+      if (!backup || backup.harvestId !== activeHarvestId) { setToast('A cópia pertence a outra safra. Selecione a safra correspondente para recuperá-la.'); return; }
+      const snapshot = backup.snapshot;
+      Object.entries(backup.layouts).forEach(([key, value]) => localStorage.setItem(key, value));
+      persistHarvestSnapshot(snapshot);
+      localStorage.setItem('field-wheat-unified-source-v1', JSON.stringify(snapshot.source));
+      locations.splice(0, locations.length, ...snapshot.locations); trials.splice(0, trials.length, ...snapshot.trials); setRegisteredTrials([]); setSchedule(snapshot.schedule); setActivities(snapshot.activities); setSelectedTrial(snapshot.trials[0] ?? blankTrial); setDataVersion((value) => value + 1);
+      setToast('Cópia das áreas recuperada.');
+    } catch { setToast('Não foi possível recuperar a cópia das áreas.'); }
+  }
   useEffect(() => {
     if (phase !== 'app') return;
     return mountNavigationAssistant();
@@ -406,11 +437,11 @@ export default function Home() {
       const snapshot = snapshots[activeHarvestId];
       const storedLocations = JSON.parse(localStorage.getItem('field-wheat-locations-clean-v1') ?? '[]') as NetworkLocation[];
       const storedTrials = JSON.parse(localStorage.getItem('field-wheat-imported-trials-clean-v1') ?? '[]') as Trial[];
-      const savedLocations = (snapshot?.locations?.length ? snapshot.locations : storedLocations.length ? storedLocations : baseLocations).map((location) => ({ ...location, program: locationProgram(location) }));
-      const savedTrials = snapshot?.trials?.length ? snapshot.trials : storedTrials.length ? storedTrials : baseTrials;
+      const savedLocations = (snapshot ? snapshot.locations : storedLocations.length ? storedLocations : baseLocations).map((location) => ({ ...location, program: locationProgram(location) }));
+      const savedTrials = snapshot ? snapshot.trials : storedTrials.length ? storedTrials : baseTrials;
       locations.splice(0, locations.length, ...savedLocations);
       trials.splice(0, trials.length, ...savedTrials);
-      if (snapshot?.locations?.length || snapshot?.trials?.length) { setSchedule(snapshot.schedule); setActivities(snapshot.activities); setLastUpdated(snapshot.updatedAt); localStorage.setItem('field-wheat-unified-source-v1', JSON.stringify(snapshot.source)); }
+      if (snapshot) { setSchedule(snapshot.schedule); setActivities(snapshot.activities); setLastUpdated(snapshot.updatedAt); localStorage.setItem('field-wheat-unified-source-v1', JSON.stringify(snapshot.source)); }
       if (savedTrials[0]) setSelectedTrial(savedTrials[0]);
       setDataVersion((value) => value + 1);
     } catch { /* A base incorporada permanece disponível quando o armazenamento local é inválido. */ }
@@ -431,11 +462,11 @@ export default function Home() {
       localStorage.setItem('field-wheat-imported-trials-clean-v1', JSON.stringify(seededTrials));
       localStorage.setItem('field-wheat-schedule-clean-v1', JSON.stringify(seededSchedule));
       localStorage.setItem('field-wheat-activities-clean-v1', JSON.stringify(seededActivities));
-      localStorage.setItem('field-wheat-unified-source-v1', JSON.stringify(importedSource));
+      localStorage.setItem('field-wheat-unified-source-v1', '[]');
       const updatedAt = new Date().toISOString();
       try {
         const snapshots = JSON.parse(localStorage.getItem('field-wheat-harvest-data-v2') ?? '{}') as Record<string, HarvestSnapshot>;
-        snapshots[activeHarvestId] = { locations: seededLocations, trials: seededTrials, schedule: seededSchedule, activities: seededActivities, source: importedSource.map((row) => ({ ...row })), updatedAt };
+        snapshots[activeHarvestId] = { locations: seededLocations, trials: seededTrials, schedule: seededSchedule, activities: seededActivities, source: [], updatedAt };
         localStorage.setItem('field-wheat-harvest-data-v2', JSON.stringify(snapshots));
       } catch { /* O app continua com a base incorporada mesmo sem o histórico local. */ }
       setLastUpdated(updatedAt); setDataVersion((value) => value + 1);
@@ -776,7 +807,7 @@ export default function Home() {
     trials.splice(0, trials.length, ...nextTrials); setRegisteredTrials([]); setActivities(nextActivities); setDataVersion((value) => value + 1);
     localStorage.setItem('field-wheat-imported-trials-clean-v1', JSON.stringify(nextTrials)); localStorage.setItem('field-wheat-trials-clean-v1', '[]'); localStorage.setItem('field-wheat-activities-clean-v1', JSON.stringify(nextActivities));
     const catalogKey = `field-wheat-layout-catalog-${activeHarvestId}-${input.locationId}`;
-    try { const catalog = JSON.parse(localStorage.getItem(catalogKey) ?? '[]') as Array<Record<string, any>>; const updatedCatalog = catalog.map((snapshot) => snapshot.metadata?.mapId === target.mapId ? { ...snapshot, plotIssues: { ...(snapshot.plotIssues ?? {}), ...Object.fromEntries(input.plotIds.map((plotId) => [plotId, { kind: input.category, note: input.description, replacementGenotype: '', updatedAt: new Date().toISOString() }])) }, savedAt: new Date().toISOString() } : snapshot); localStorage.setItem(catalogKey, JSON.stringify(updatedCatalog)); const legacyKey = `field-wheat-layout-${activeHarvestId}-${input.locationId}`; const activeSnapshot = updatedCatalog.find((snapshot) => snapshot.metadata?.mapId === target.mapId); if (activeSnapshot) localStorage.setItem(legacyKey, JSON.stringify(activeSnapshot)); } catch { /* preserva o reporte mesmo quando o croqui legado não está disponível */ }
+    try { const catalog = parseLayout<Array<Record<string, any>>>(localStorage.getItem(catalogKey) ?? '[]'); const updatedCatalog = catalog.map((snapshot) => snapshot.metadata?.mapId === target.mapId ? { ...snapshot, plotIssues: { ...(snapshot.plotIssues ?? {}), ...Object.fromEntries(input.plotIds.map((plotId) => [plotId, { kind: input.category, note: input.description, replacementGenotype: '', updatedAt: new Date().toISOString() }])) }, savedAt: new Date().toISOString() } : snapshot); localStorage.setItem(catalogKey, stringifyLayout(updatedCatalog)); const legacyKey = `field-wheat-layout-${activeHarvestId}-${input.locationId}`; const activeSnapshot = updatedCatalog.find((snapshot) => snapshot.metadata?.mapId === target.mapId); if (activeSnapshot) localStorage.removeItem(legacyKey); } catch { /* preserva o reporte mesmo quando o croqui legado não está disponível */ }
     const updatedAt = persistHarvestSnapshot({ trials: nextTrials, activities: nextActivities }); touchHarvest(updatedAt, nextActivities);
     setToast(`${input.plotIds.length} PlotID(s) atualizados automaticamente no croqui de ${target.name}.`); setTimeout(() => setToast(''), 4000);
   }
@@ -941,6 +972,7 @@ export default function Home() {
           </section>
           <div className="program-breadcrumb">Brasil{activeProgram ? ` / ${activeProgram.name}` : ' / Síntese nacional'}</div>
           {screen === 'cadastros' && ['Administrador','Gestor','RA'].includes(currentRole) && <details className="card program-assignment"><summary>Organizar locais por programa · independente da RHA</summary><p>Transferir o local preserva seus ensaios, croquis, RHA e registros.</p>{locations.map((location) => <label key={location.id}><span>{location.name} · {rhaLabel(location.rha || location.region)}</span><select aria-label={`Programa de ${location.name}`} value={locationProgram(location)} onChange={(event) => assignLocationProgram(location.id, event.target.value as 'U' | 'K' | 'X')}>{programs.map((program) => <option key={program.id} value={program.id}>{program.name}</option>)}</select></label>)}</details>}
+          {screen === 'cadastros' && currentRole === 'Administrador' && <section className="card area-reset-panel"><div><b>Preparar novos cadastros</b><p>Limpa os locais, ensaios e registros vinculados da safra ativa em todos os programas, preservando uma cópia recuperável neste navegador.</p></div><button type="button" className="secondary-button" disabled={!locations.length} onClick={resetAreas}>Limpar áreas da safra com cópia de segurança</button>{areaBackupAvailable && <button type="button" className="secondary-button" disabled={Boolean(locations.length)} onClick={restoreAreas}>Recuperar áreas anteriores</button>}</section>}
           <ProgramLocations.Provider value={scopedLocations}><div key={programId} className={programId === 'Brasil' ? 'national-summary' : 'program-workspace'}>
           {screen === 'dashboard' && <><Dashboard trialList={scopedTrials} activities={scopedActivities} schedule={scopedSchedule} harvests={harvests} activeHarvestId={activeHarvestId} onHarvest={switchHarvest} onNavigate={go} onFilter={openFiltered} onTrial={(trial) => { setSelectedTrial(trial); go('detalhe'); }} /></>}
           {screen === 'mapa' && <MapScreen harvestId={activeHarvestId} trialList={scopedTrials} activities={scopedActivities} schedule={scopedSchedule} weatherConditions={weatherConditions.filter((item) => scopedLocationIds.has(item.locationId))} weatherChecking={weatherChecking} weatherCheckedAt={weatherCheckedAt} onRefreshWeather={refreshWeatherConditions} onLocation={(locationId) => openFiltered({ locationId })} />}
@@ -1324,7 +1356,7 @@ function AdminRegistrationScreen({ registeredTrials, trialList, activities, sche
       const rows = JSON.parse(localStorage.getItem('field-wheat-unified-source-v1') ?? '[]') as Record<string, unknown>[];
       const row = rows.find((item) => item.ensaio_codigo === trial.id);
       if (row?.parcela_inicial && row?.parcela_final) return { start: String(row.parcela_inicial), end: String(row.parcela_final) };
-      const catalog = JSON.parse(localStorage.getItem(`field-wheat-layout-catalog-${activeHarvestId}-${trial.locationId}`) ?? '[]') as Array<{ metadata?: { mapId?: string }; allocations?: Array<{ id: string; startPlotId: string; endPlotId: string }> }>;
+      const catalog = parseLayout(localStorage.getItem(`field-wheat-layout-catalog-${activeHarvestId}-${trial.locationId}`) ?? '[]') as Array<{ metadata?: { mapId?: string }; allocations?: Array<{ id: string; startPlotId: string; endPlotId: string }> }>;
       const allocation = catalog.find((map) => map.metadata?.mapId === trial.mapId)?.allocations?.find((item) => trial.id === `${item.id}-${trial.locationId}-${trial.mapId}`);
       return { start: allocation?.startPlotId ?? '', end: allocation?.endPlotId ?? '' };
     } catch { return { start: '', end: '' }; }
@@ -1457,7 +1489,7 @@ function CroquiCatalogPanel({ harvestId, harvestName, locked, locationsList, tri
     setDraftLocation(draft); setSelectedLocationId(code); setNewAreaOpen(false); setLayoutOpen(true);
   }
   function openLayout(location: NetworkLocation) { setDraftLocation(null); setSelectedLocationId(location.id); setLayoutOpen(true); }
-  return <><section className="management-grid croqui-catalog"><article className="card management-form"><span className="eyebrow">FLUXO OFICIAL DE CADASTRO</span><h2>Cadastro de local por croqui</h2><p>Crie a área, carregue o Excel, posicione as parcelas e defina cada ensaio manualmente pelo intervalo de PlotID/Trat. Ao concluir, a área entra imediatamente em Áreas cadastradas.</p><div className="croqui-flow"><span><b>1</b>Código e coordenada</span><span><b>2</b>Croqui Excel</span><span><b>3</b>Ensaios por PlotID</span><span><b>4</b>Área cadastrada</span></div><button className="primary-button wide" disabled={locked} onClick={() => setNewAreaOpen(true)}>＋ Nova área por croqui ou lista beta</button><p>Opção beta: após abrir a área, selecione Gerar croqui por lista e carregue PlotID, Ensaio e Genótipo.</p>{locked && <small className="locked-copy">A safra está encerrada. Reabra-a para alterar cadastros.</small>}</article><article className="card admin-catalog management-area-catalog"><div className="card-head"><div><h2>Áreas cadastradas</h2><p>Edite croquis e remova ensaios com confirmação de segurança.</p></div><b>{locationsList.length}</b></div>{locationsList.map((location) => { const localTrials = trialList.filter((trial) => trial.locationId === location.id); const localSchedule = schedule.filter((item) => localTrials.some((trial) => trial.id === item.trialId)); return <section className="managed-area" key={location.id}><header><span><b>{location.name}</b><small>{location.id} · {location.city} · {location.plots} parcelas</small></span><strong>{localSchedule.length} atividades</strong><button className="secondary-button" disabled={locked} onClick={() => openLayout(location)}>Editar croqui</button><button className="danger-button" disabled={locked} onClick={() => confirmAction(`Excluir ${location.name} e todos os seus ensaios, atividades e registros?`, () => onDeleteLocation(location.id))}>Excluir local</button></header><div className="managed-trials">{localTrials.map((trial) => <div key={trial.id}><span><b>{trial.name}</b><small>{trial.id} · {trial.plots} parcelas</small></span><button className="danger-link" disabled={locked} onClick={() => confirmAction(`Excluir o ensaio ${trial.name}? O planejamento e os registros vinculados também serão removidos.`, () => onDeleteTrial(trial.id))}>Excluir ensaio</button></div>)}{localTrials.length === 0 && <small>Nenhum ensaio finalizado neste croqui.</small>}</div></section>; })}{locationsList.length === 0 && <div className="empty-admin"><span>⌖</span><p>Nenhuma área finalizada pelo croqui.</p></div>}</article></section>{newAreaOpen && <NewAreaDialog harvestName={harvestName} onClose={() => setNewAreaOpen(false)} onSubmit={startArea} />}{layoutOpen && current && <FieldLayoutMap harvestId={harvestId} location={current} trials={trialList.filter((trial) => trial.locationId === current.id)} onClose={() => { setLayoutOpen(false); setDraftLocation(null); }} onFinalize={(payload) => { onFinalize(payload); setLayoutOpen(false); setDraftLocation(null); setSelectedLocationId(payload.location.id); }} />}</>;
+  return <><section className="management-grid croqui-catalog"><article className="card management-form"><span className="eyebrow">FLUXO OFICIAL DE CADASTRO</span><h2>Cadastro de local por croqui</h2><p>Crie a área, carregue o Excel, posicione as parcelas e defina cada ensaio manualmente pelo intervalo de PlotID/Trat. Ao concluir, a área entra imediatamente em Áreas cadastradas.</p><div className="croqui-flow"><span><b>1</b>Código e coordenada</span><span><b>2</b>Croqui Excel</span><span><b>3</b>Ensaios por PlotID</span><span><b>4</b>Área cadastrada</span></div><button className="primary-button wide" disabled={locked} onClick={() => setNewAreaOpen(true)}>＋ Nova área por croqui ou lista beta</button><p>Opção beta: após abrir a área, selecione Gerar croqui por lista e carregue PlotID, Ensaio e Genótipo.</p>{locked && <small className="locked-copy">A safra está encerrada. Reabra-a para alterar cadastros.</small>}</article><article className="card admin-catalog management-area-catalog"><div className="card-head"><div><h2>Áreas cadastradas</h2><p>Edite croquis e remova ensaios com confirmação de segurança.</p></div><b>{locationsList.length}</b></div>{locationsList.map((location) => { const localTrials = trialList.filter((trial) => trial.locationId === location.id); const localSchedule = schedule.filter((item) => localTrials.some((trial) => trial.id === item.trialId)); return <section className="managed-area" key={location.id}><header><span><b>{location.name}</b><small>{location.id} · {location.city} · {location.plots} parcelas</small></span><strong>{localSchedule.length} atividades</strong><button className="secondary-button" disabled={locked} onClick={() => openLayout(location)}>Editar croqui</button><button className="danger-button" disabled={locked} onClick={() => confirmAction(`Excluir ${location.name} e todos os seus ensaios, atividades e registros?`, () => onDeleteLocation(location.id))}>Excluir local</button></header><div className="managed-trials">{localTrials.map((trial) => <div key={trial.id}><span><b>{trial.name}</b><small>{trial.id} · {trial.plots} parcelas</small></span><button className="danger-link" disabled={locked} onClick={() => confirmAction(`Excluir o ensaio ${trial.name}? O planejamento e os registros vinculados também serão removidos.`, () => onDeleteTrial(trial.id))}>Excluir ensaio</button></div>)}{localTrials.length === 0 && <small>Nenhum ensaio finalizado neste croqui.</small>}</div></section>; })}{locationsList.length === 0 && <div className="empty-admin"><span>⌖</span><p>Nenhuma área finalizada pelo croqui.</p></div>}</article></section>{newAreaOpen && <NewAreaDialog harvestName={harvestName} onClose={() => setNewAreaOpen(false)} onSubmit={startArea} />}{layoutOpen && current && <FieldLayoutMap harvestId={harvestId} location={current} trials={trialList.filter((trial) => trial.locationId === current.id)} onClose={() => { setLayoutOpen(false); setDraftLocation(null); }} onFinalize={(payload) => { onFinalize(payload); if (!payload.continueEditing) { setLayoutOpen(false); setDraftLocation(null); } setSelectedLocationId(payload.location.id); }} />}</>;
 }
 
 function ActivityTemplateManager({ templates, onChange }: { templates: ActivityTemplate[]; onChange: (templates: ActivityTemplate[]) => void }) {
