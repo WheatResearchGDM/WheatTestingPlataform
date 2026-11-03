@@ -17,15 +17,14 @@ export function validateLayout(snapshot: LayoutSnapshot) {
   const ids = new Set(allocations.map((item) => item.id));
   const names = allocations.map((item) => item.name.trim().toLocaleLowerCase('pt-BR'));
   if (ids.size !== allocations.length || names.some((name) => !name) || new Set(names).size !== names.length) throw new Error('Cada ensaio precisa ter identificação e nome únicos neste mapa.');
-  const seen = new Set<string>(), positions = new Set<string>();
+  const positions = new Set<string>();
   for (const plot of plots) {
     if (![plot.row, plot.col].every((n) => Number.isInteger(n) && n > 0)) throw new Error(`Posição inválida no PlotID ${plot.plotId}.`);
     const cell = `${plot.row}:${plot.col}`;
     if (positions.has(cell)) throw new Error(`Duas parcelas ocupam a mesma célula: ${cell}.`);
     positions.add(cell);
     if (isUtilityId(plot.plotId)) continue;
-    if (!plot.plotId.trim() || seen.has(plot.plotId)) throw new Error(`PlotID vazio ou duplicado: ${plot.plotId}.`);
-    seen.add(plot.plotId);
+    if (!plot.plotId.trim()) throw new Error('Preencha o PlotID da parcela.');
     if (!ids.has(plot.allocationId ?? plot.trialId)) throw new Error(`O PlotID ${plot.plotId} ainda não está vinculado a um ensaio.`);
   }
   for (const allocation of allocations) {

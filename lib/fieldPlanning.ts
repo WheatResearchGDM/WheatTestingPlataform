@@ -1,3 +1,4 @@
+import { plotIssueFor } from './plotIdentity';
 import type { LayoutFinalization } from '../domain/layout';
 import type { ActivityTemplate, HarvestSnapshot, MacroGroup, PlannedActivity, Trial } from '../domain/types';
 import { addDays } from './dates';
@@ -21,8 +22,8 @@ export function buildFieldPlanning(payload: LayoutFinalization, current: Harvest
     const id = `${allocation.id}-${payload.location.id}-${payload.mapId}`;
     const previous = previousTrials.find((trial) => trial.name === allocation.name) ?? previousTrials.find((trial) => trial.id === id);
     const parcels = parcelsByAllocation.get(allocation.id) ?? [];
-    const affectedPlots = parcels.filter((plot) => impactKinds.has(payload.plotIssues[plot.plotId]?.kind)).map((plot) => plot.plotId);
-    const lostPlots = parcels.filter((plot) => payload.plotIssues[plot.plotId]?.kind === 'Parcela perdida').map((plot) => plot.plotId);
+    const affectedPlots = parcels.filter((plot) => impactKinds.has(plotIssueFor(payload.plotIssues, plot)?.kind ?? '')).map((plot) => plot.plotId);
+    const lostPlots = parcels.filter((plot) => plotIssueFor(payload.plotIssues, plot)?.kind === 'Parcela perdida').map((plot) => plot.plotId);
     return { ...previous, id: previous?.id ?? id, name: allocation.name, type: group, subtype: payload.areaType, areaCategory: payload.areaType, mapId: payload.mapId, year: Number(payload.plannedSowingDate.slice(0, 4)), cycle: context.harvestName, locationId: payload.location.id, plots: parcels.length, sowing: payload.plannedSowingDate, harvest: addDays(payload.plannedSowingDate, 120), owner: previous?.owner ?? 'Wheat Team', rawStatus: previous?.rawStatus ?? 'Planejado', priority: previous?.priority ?? 'Normal', notes: previous?.notes ?? `Criado pelo ${payload.mapName}`, place: payload.location.name, city, status: previous?.status ?? 'Planejado', progress: previous?.progress ?? 0, next: previous?.next ?? 'Semeadura', nextDate: previous?.nextDate ?? payload.plannedSowingDate, date: payload.plannedSowingDate, fieldName: payload.mapName, issueCount: affectedPlots.length, affectedPlots, lostPlots, layoutPenalty: Math.min(40, Math.max(0, Math.round((affectedPlots.length / Math.max(1, parcels.length) - .1) * 50))) };
   });
   if (new Set(newTrials.map((trial) => trial.id)).size !== newTrials.length) throw new Error('A edição criaria dois ensaios com a mesma identificação. Confira os nomes e intervalos.');

@@ -8,12 +8,9 @@ export function generateListLayout(entries: ListEntry[], options: ListLayoutOpti
   if (![width, length, strip].every((n) => Number.isFinite(n) && n > 0)) throw new Error('As dimensões devem ser maiores que zero.');
   if (strip + 0.000001 < width * 10) throw new Error(`A faixa precisa ter pelo menos ${(width * 10).toFixed(2)} m para acomodar 10 parcelas.`);
   if (!entries.length || entries.length > 10000) throw new Error('Carregue de 1 a 10.000 parcelas.');
-  const seen = new Set<string>();
   const groups = new Map<string, ListEntry[]>();
   entries.forEach((entry, index) => {
     if (!entry.plotId.trim() || !entry.trial.trim() || !entry.genotype.trim()) throw new Error(`Linha ${index + 2}: preencha PlotID, Ensaio e Genótipo.`);
-    if (seen.has(entry.plotId)) throw new Error(`PlotID duplicado: ${entry.plotId}.`);
-    seen.add(entry.plotId);
     if (!groups.has(entry.trial)) groups.set(entry.trial, []); groups.get(entry.trial)!.push(entry);
   });
   const plots: Array<{ plotId: string; row: number; col: number; genotype: string; genealogy?: string; trialId: string; allocationId: string }> = [];

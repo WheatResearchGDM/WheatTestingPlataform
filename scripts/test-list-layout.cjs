@@ -22,7 +22,7 @@ const mixed = generateListLayout([entry(1), entry(3, 'K01'), entry(2)], options)
 assert.equal(mixed.allocations.length, 2);
 assert.equal(mixed.plots[1].plotId, '2');
 assert.equal(mixed.plots[2].col, 11);
-assert.throws(() => generateListLayout([entry(1), entry(1)], options), /duplicado/);
+assert.equal(generateListLayout([entry(1), entry(1)], options).plots.length, 2);
 assert.throws(() => generateListLayout([entry(1)], { ...options, strip: 11 }), /pelo menos/);
 assert.throws(() => generateListLayout([entry(1)], { ...options, rows: 1.5 }), /rows/);
 assert.throws(() => generateListLayout([{ ...entry(1), genotype: '' }], options), /preencha/);

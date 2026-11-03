@@ -12,5 +12,7 @@ assert.equal(plots.length, 4); assert.equal(plots[0].plotId, '001'); assert.equa
 assert.equal(plots.at(-1).plotId, '2'); assert.equal(plots.at(-1).row, 1);
 assert.equal(plots[0].excelColor, '#123456'); assert.equal(spreadsheetText(sheet.getCell('A1')), '001');
 sheet.getCell('D1').value = '001';
-assert.throws(() => parsePlantingSheet(sheet, () => undefined), /duplicado/);
+const repeated = parsePlantingSheet(sheet, () => undefined);
+assert.equal(repeated.length, 5);
+assert.equal(load('lib/plotIdentity.ts').duplicatePlotIds(repeated).join(','), '001');
 console.log('Excel import: sparse sheets, formatting outside map, leading zeros, formula results, colors and duplicate validation passed.');

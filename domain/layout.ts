@@ -6,7 +6,7 @@ export type TrialAllocation = { id: string; code: string; name: string; startPlo
 
 export type IssueKind = 'Observação' | 'Alerta' | 'Troca de genótipo' | 'Linha entupida' | 'Falha de semeadura' | 'Passada de pulverizador' | 'Fitotoxidez' | 'Parcela perdida' | 'Outro';
 
-export type PlotIssue = { kind: IssueKind; note: string; replacementGenotype?: string; updatedAt: string };
+export type PlotIssue = { cleared?: boolean; kind: IssueKind; note: string; replacementGenotype?: string; updatedAt: string };
 
 export type LayoutSettings = { generatedFromList?: boolean; widthHorizontal?: boolean; plotLength: number; plotWidth: number; gapLength: number; gapWidth: number; rotation: number; flipX: boolean; flipY: boolean; mapStyle: MapStyle; showPlotIds: boolean; center: [number, number]; trialLabels: Record<string, string>; trialVisibility: Record<string, boolean> };
 

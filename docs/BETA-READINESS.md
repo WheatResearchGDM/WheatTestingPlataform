@@ -22,12 +22,12 @@ Esta rodada revisa os fluxos existentes e reorganiza seus pontos críticos, pres
 ## Correções e proteções
 
 - Salvar mapa e aplicar lista têm barras de ações fora das áreas de rolagem. O botão de salvar permanece visível, inclusive após salvar; mensagens de validação ficam junto às ações.
-- Movimentação usa contornos convexos dos ensaios, em uma camada de desenho separada com 50% de transparência. Não recalcula parcelas durante o arraste. Confirmar aplica a posição uma vez; cancelar preserva a posição anterior. O contorno é uma aproximação externa e pode abranger intervalos vazios.
+- Movimentação usa contornos convexos dos ensaios, em uma camada de desenho separada com 50% de transparência. Não recalcula parcelas durante a prévia. Um clique no ícone ativa o movimento da silhueta com o cursor; o segundo clique fixa a posição. Esc cancela. O contorno é uma aproximação externa e pode abranger intervalos vazios.
 - Locais e ensaios usam estado React por instância, em vez de arrays globais mutáveis.
 - Mapas, ensaios, atividades, planejamento e metadados da safra são gravados em lote nos fluxos principais. Falha de gravação restaura os valores anteriores antes de apresentar erro. Isso protege contra falhas síncronas; localStorage não é um banco transacional resistente a fechamento abrupto do navegador.
 - Editar o croqui preserva atividades concluídas, datas realizadas e registros existentes. Remover um ensaio com registros durante uma edição é bloqueado; a exclusão explícita permanece no gerenciamento.
 - Reordenar a lista não muda a identificação do ensaio. Mapas anteriores continuam sendo lidos.
-- A importação visita células ocupadas, preserva zeros à esquerda e cores e ignora formatação distante da grade. PlotIDs duplicados, parcelas sem ensaio, dimensões inválidas e datas inválidas impedem a conclusão com mensagem clara.
+- A importação visita células ocupadas, preserva zeros à esquerda e cores e ignora formatação distante da grade. PlotIDs repetidos geram aviso que pode ser ignorado; cada célula mantém sua própria seleção e ocorrência. Parcelas sem ensaio, dimensões inválidas e datas inválidas impedem a conclusão com mensagem clara.
 - Importações antigas não são aplicadas a outro mapa quando o usuário troca de contexto.
 - Semeadura e colheita usam registros operacionais. Datas previstas não contam como execução. Atrasos usam a data atual de São Paulo.
 - Exclusão de local remove também o catálogo de croquis. Exclusão de ensaio libera suas parcelas no mapa para impedir recriação acidental.
@@ -50,3 +50,7 @@ Para conferir a rodada beta, use arquivos de teste e valide: importar grade, def
 Os registros e fotos continuam locais ao navegador, sem sincronização entre aparelhos. O login e as permissões são demonstrativos e não substituem autenticação/autorização no servidor. Não usar como base única de dados de produção. O arquivo de recuperação inclui dados JSON, mas não os blobs das fotos.
 
 As rotas dependem de OSRM, sem trânsito em tempo real. O cálculo maior que 12 paradas usa aproximação. O mapa satélite depende da disponibilidade de imagens do provedor. Algumas telas administrativas legadas ainda têm controles demonstrativos; a rodada funcional deve seguir os fluxos descritos acima. Não há garantia de ausência de todos os defeitos; achados da rodada devem registrar tela, arquivo usado e passos de reprodução.
+
+## Ajuste de registro de doenças
+
+A nota geral de severidade é única. Quando há doenças, o registro permite selecionar Mosaico, Giberela, Ferrugem, Oídio, Mancha bacteriana e Outros, com observação textual. A consolidação exporta a nota geral, as doenças selecionadas e a descrição. Fora do perfilhamento, estabelecimento e uniformidade exibem apenas suas notas com ícone de bloqueio discreto.
