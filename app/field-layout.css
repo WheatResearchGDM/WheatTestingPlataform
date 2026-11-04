@@ -62,6 +62,17 @@
 @media (max-width:760px) { .disease-selection>div { grid-template-columns:1fr 1fr; } }
 .layout-move-confirm button { min-height:42px; border:1px solid #bdd0c1; border-radius:9px; padding:8px 16px; background:#f2f7f2; color:#245238; font-weight:600; }.layout-move-confirm button:last-child { background:#216b49; color:white; }
 .list-layout-dialog>header,.list-layout-dialog>footer { flex-shrink:0; }
+.layout-file-step p { margin:0; font-size:12px; line-height:1.5; color:#52675a; }
+.layout-file-step input[type=file] { display:block; width:100%; min-width:0; padding:10px; border:1px solid #b8cbbf; border-radius:9px; background:#f4faf6; font-size:12px; }
+.layout-file-step input::file-selector-button { padding:9px 12px; margin:0 8px 4px 0; border:0; border-radius:7px; background:#216b49; color:white; cursor:pointer; }
+.layout-file-step select { min-height:38px; width:100%; border:1px solid #b8cbbf; border-radius:8px; padding:6px; background:white; }
+.layout-file-step [role=alert] { color:#a02e26; }
+.layout-extras { display:block; }
+.layout-extras>summary { cursor:pointer; font-size:12px; font-weight:650; padding:4px 0; }
+.layout-extras[open]>summary { margin-bottom:14px; }
+.layout-extras>.layout-control,.layout-extras>.layout-upload,.layout-extras>.list-layout-beta,.layout-extras>button { margin-bottom:12px; }
+.layout-extras>.layout-upload { display:grid; }
+.layout-workspace>aside { scroll-padding:16px; }
 .list-layout-body { min-height:0; flex:1 1 auto; }
 .list-layout-dialog>footer { display:flex; justify-content:space-between; align-items:center; gap:16px; padding:14px 24px; border-top:1px solid var(--ui-border); background:var(--ui-surface); }
 .list-layout-dialog>footer small { color:var(--ui-muted); }

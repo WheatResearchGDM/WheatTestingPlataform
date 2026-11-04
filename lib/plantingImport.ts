@@ -3,10 +3,19 @@ import type { LayoutPlot } from '../domain/layout';
 
 
 export function spreadsheetText(cell: Cell): string {
-  const value = cell.value;
+  // ExcelJS cell.text calls .toString() on the master of merged cells.
+  // An empty merged master is null, which used to abort the entire import.
+  let value = cell.value;
+  if (value == null) return '';
+  if (typeof value === 'object' && ('formula' in value || 'sharedFormula' in value)) value = cell.result ?? value.result ?? null;
+  if (value == null) return '';
   const number = typeof value === 'number' ? value : value && typeof value === 'object' && 'result' in value && typeof value.result === 'number' ? value.result : undefined;
   if (number !== undefined && Number.isInteger(number) && /^0+$/.test(cell.numFmt ?? '')) return String(number).padStart(cell.numFmt.length, '0');
-  return cell.text.trim();
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return String(value).trim();
+  if (value instanceof Date) return Number.isFinite(value.getTime()) ? value.toISOString().slice(0, 10) : '';
+  if ('richText' in value) return value.richText.map((part) => part?.text ?? '').join('').trim();
+  if ('text' in value) return String(value.text ?? '').trim();
+  return '';
 }
 
 /** Visit occupied cells only; formatting far outside the field cannot create huge grids. */
